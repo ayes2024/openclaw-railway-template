@@ -1,6 +1,6 @@
 # OpenClaw Railway Template (1‑click deploy)
 
-This repo packages **OpenClaw** for Railway with a small **/setup** web wizard so users can deploy and onboard **without running any commands**.
+This repo packages **OpenClaw** for Railway with a small **/setup** web wizard so users can deploy and onboard **without running any commands**. The Docker build pulls the pinned OpenClaw source from [`ayes2024/openclaw`](https://github.com/ayes2024/openclaw).
 
 ## What you get
 
