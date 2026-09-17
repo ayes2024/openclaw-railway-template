@@ -45,6 +45,7 @@ Optional:
 - `WASENDER_PROVIDER=wasenderapi` — use `wasender-dev` only for the separate wasender.dev service
 - `WASENDER_ALLOW_GROUPS=true` — optional; subscribe to `messages-group.received` in WAsender when enabled
 - `WASENDER_GROUP_AGENT_ROUTES={"120363...@g.us":"cavad-aem-ba"}` — optional; route selected groups directly to their own agent and send replies back to the same group
+- `WASENDER_PROJECT_FLOWS=[{"name":"AEM CRM","agentId":"cavad-aem-ba","intakeGroupName":"AEM CRM Task","approvalGroupJid":"120363...@g.us"}]` — optional; analyse a client group in a private approval group before creating a task or replying
 - `AYES_TASK_URL`, `AYES_TASK_EMAIL`, `AYES_TASK_PASSWORD` — Cavad's AYES Task account
 - `AYES_TASK_PROJECT_ID`, `AYES_TASK_TYPE_ID` — target project and task type
 - `AYES_TASK_EXECUTOR_IDS`, `AYES_TASK_REVIEWER_IDS`, `AYES_TASK_APPROVER_IDS` — comma-separated default assignees

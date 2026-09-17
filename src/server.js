@@ -61,6 +61,7 @@ const WASENDER_AGENT_ID = process.env.WASENDER_AGENT_ID?.trim() || "cavad-aem-ba
 const WASENDER_PROVIDER = process.env.WASENDER_PROVIDER?.trim().toLowerCase() || "wasenderapi";
 const WASENDER_ALLOW_GROUPS = process.env.WASENDER_ALLOW_GROUPS === "true";
 const WASENDER_GROUP_AGENT_ROUTES = parseGroupAgentRoutes(process.env.WASENDER_GROUP_AGENT_ROUTES);
+const WASENDER_PROJECT_FLOWS = parseProjectFlows(process.env.WASENDER_PROJECT_FLOWS);
 const WASENDER_ADMIN_NUMBER = normalizeWasenderSender(process.env.WASENDER_ADMIN_NUMBER || "");
 const WASENDER_ALLOWED_SENDERS = new Set(
   (process.env.WASENDER_ALLOWED_SENDERS || "")
@@ -101,6 +102,35 @@ function parseGroupAgentRoutes(value) {
   } catch {
     console.warn("[wasender] WASENDER_GROUP_AGENT_ROUTES must be a JSON object");
     return new Map();
+  }
+}
+
+function normalizeGroupName(value) {
+  return String(value || "").trim().replace(/\s+/g, " ").toLocaleLowerCase("az-AZ");
+}
+
+function parseProjectFlows(value) {
+  if (!value?.trim()) return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) throw new Error("expected an array");
+    return parsed
+      .map((flow) => ({
+        name: String(flow?.name || "Layihə").trim(),
+        agentId: String(flow?.agentId || "").trim(),
+        intakeGroupJid: normalizeWasenderSender(flow?.intakeGroupJid || ""),
+        intakeGroupName: String(flow?.intakeGroupName || "").trim(),
+        approvalGroupJid: normalizeWasenderSender(flow?.approvalGroupJid || ""),
+      }))
+      .filter(
+        (flow) =>
+          flow.agentId &&
+          flow.approvalGroupJid.endsWith("@g.us") &&
+          (flow.intakeGroupJid.endsWith("@g.us") || flow.intakeGroupName),
+      );
+  } catch {
+    console.warn("[wasender] WASENDER_PROJECT_FLOWS must be a JSON array");
+    return [];
   }
 }
 
@@ -489,6 +519,42 @@ async function sendWasenderText(to, text) {
   }
 }
 
+const wasenderGroupNameCache = new Map();
+
+async function getWasenderGroupName(groupJid) {
+  if (wasenderGroupNameCache.has(groupJid)) return wasenderGroupNameCache.get(groupJid);
+
+  const response = await fetch(
+    `https://www.wasenderapi.com/api/groups/${encodeURIComponent(groupJid)}/metadata`,
+    {
+      headers: {
+        Authorization: `Bearer ${WASENDER_API_KEY}`,
+        "User-Agent": "Mozilla/5.0",
+      },
+      signal: AbortSignal.timeout(30_000),
+    },
+  );
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(`WAsender group metadata failed (${response.status})`);
+  const name = String(body.data?.subject || body.data?.name || body.subject || body.name || "").trim();
+  if (name) wasenderGroupNameCache.set(groupJid, name);
+  return name;
+}
+
+async function resolveProjectIntakeFlow(groupJid) {
+  const direct = WASENDER_PROJECT_FLOWS.find((flow) => flow.intakeGroupJid === groupJid);
+  if (direct) return direct;
+
+  const namedFlows = WASENDER_PROJECT_FLOWS.filter((flow) => flow.intakeGroupName);
+  if (!namedFlows.length) return null;
+  const groupName = await getWasenderGroupName(groupJid);
+  return (
+    namedFlows.find(
+      (flow) => normalizeGroupName(flow.intakeGroupName) === normalizeGroupName(groupName),
+    ) || null
+  );
+}
+
 function voiceFileExtension(mimetype) {
   const type = String(mimetype || "").toLowerCase();
   if (type.includes("ogg") || type.includes("opus")) return "ogg";
@@ -653,29 +719,36 @@ async function createAyesTask(draft) {
   });
 }
 
-function latestPendingApproval(code = "") {
-  if (code) return wasenderPending[code] || null;
+function latestPendingApproval(code = "", approvalTarget = "") {
+  if (code) {
+    const entry = wasenderPending[code] || null;
+    return entry && (!approvalTarget || entry.approvalTarget === approvalTarget) ? entry : null;
+  }
   return (
     Object.values(wasenderPending)
-      .filter((entry) => entry.status === "pending")
+      .filter(
+        (entry) =>
+          entry.status === "pending" &&
+          (!approvalTarget || entry.approvalTarget === approvalTarget),
+      )
       .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0] || null
   );
 }
 
 function approvalNotice(entry) {
   const source = entry.isGroup
-    ? `Qrup: ${entry.sender}${entry.participant ? `\nYazan: +${entry.participant}` : ""}`
+    ? `Müştəri qrupu: ${entry.sourceName || entry.sender}${entry.participant ? `\nYazan: +${entry.participant}` : ""}`
     : `Şəxsi mesaj: +${entry.sender}`;
   return [
-    `📩 ${entry.code} — yeni AEM mesajı`,
+    `📩 ${entry.code} — yeni ${entry.flowName || "AEM"} mesajı`,
     source,
     `\nMesaj:\n${entry.text}`,
-    `\nCavadın analizi:\n${entry.analysis}`,
-    "\nƏmr yazın:",
-    `${entry.code} CAVAB`,
-    `${entry.code} TASK`,
-    `${entry.code} YAZ: sizin mətniniz`,
-    `${entry.code} KEÇ`,
+    `\nCavadın sizə texniki izahı:\n${entry.analysis}`,
+    "\nCavada adi dildə təlimat verə bilərsiniz. Məsələn:",
+    '“Task aç və qrupa yaz ki, məsələni araşdırırıq.”',
+    '“Müştəriyə de ki, bu gün yoxlayacağıq.”',
+    '“Bu texniki problem niyə yaranıb?”',
+    `Kodla qısa əmrlər: ${entry.code} CAVAB / TASK / YAZ: ... / KEÇ`,
   ].join("\n");
 }
 
@@ -785,6 +858,192 @@ async function processOwnerInstruction(inbound) {
   await sendWasenderText(WASENDER_ADMIN_NUMBER, `${entry.code} cavablandırıldı.`);
 }
 
+async function planProjectApproval(entry, instruction) {
+  const parsed = parseApprovalInstruction(instruction);
+  if (parsed?.action === "skip") return { action: "skip", replyInstruction: "" };
+  if (parsed?.action === "task") {
+    return {
+      action: "task-and-reply",
+      replyInstruction: "Məsələnin qeydə alındığını və üzərində işləyəcəyimizi nəzakətlə bildir.",
+    };
+  }
+  if (parsed?.action === "reply") {
+    return { action: "reply", replyInstruction: "Təklif etdiyin uyğun cavabı göndər." };
+  }
+  if (parsed?.action === "custom-reply") {
+    return { action: "reply", replyInstruction: parsed.text };
+  }
+
+  const planText = await runWasenderAgent(
+    entry.sender,
+    [
+      "Sahibin aşağıdakı təlimatını təhlükəsiz şəkildə icra planına çevir.",
+      "Yalnız etibarlı JSON qaytar, markdown və əlavə mətn yazma.",
+      'action yalnız bunlardan biri olsun: "discuss", "reply", "task", "task-and-reply", "skip".',
+      'Format: {"action":"...","replyInstruction":"..."}',
+      'Sahib texniki sual verirsə action="discuss" seç. Müştəriyə yazmağı istəyirsə "reply" seç.',
+      'Task açmağı və müştəriyə məlumat verməyi istəyirsə "task-and-reply" seç.',
+      `Müştəri mesajı: ${entry.text}`,
+      `Texniki analiz: ${entry.analysis}`,
+      `Sahibin təlimatı: ${parsed?.text || instruction}`,
+    ].join("\n\n"),
+    entry.agentId || WASENDER_AGENT_ID,
+  );
+  const plan = parseAgentJson(planText);
+  const allowed = new Set(["discuss", "reply", "task", "task-and-reply", "skip"]);
+  if (!allowed.has(plan?.action)) {
+    return { action: "discuss", replyInstruction: parsed?.text || instruction };
+  }
+  return {
+    action: plan.action,
+    replyInstruction: String(plan.replyInstruction || parsed?.text || instruction).trim(),
+  };
+}
+
+async function createProjectTask(entry) {
+  if (!ayesTaskConfigured()) {
+    throw new Error("AYES Task üçün icraçı, yoxlayan və təsdiqləyən təyin edilməyib");
+  }
+  const taskDraftText = await runWasenderAgent(
+    entry.sender,
+    [
+      "Bu müştəri müraciətindən AYES Task üçün texniki task hazırla.",
+      "Yalnız etibarlı JSON qaytar. Markdown və əlavə mətn yazma.",
+      'Format: {"title":"...","description":"...","category":"BUG|DEVELOPMENT|NEW_FEATURE","priority":"LOW|MEDIUM|HIGH|CRITICAL","estimatedMinutes":0}',
+      "description daxilində faktiki nəticə, gözlənilən nəticə, təsirlənən hissə və qəbul meyarlarını yaz.",
+      `Orijinal müştəri mesajı: ${entry.text}`,
+      `Cavadın texniki analizi: ${entry.analysis}`,
+    ].join("\n\n"),
+    entry.agentId || WASENDER_AGENT_ID,
+  );
+  const taskDraft = parseAgentJson(taskDraftText) || {
+    title: `WhatsApp məsələsi: ${entry.text.slice(0, 180)}`,
+    description: `${entry.analysis}\n\nOrijinal mesaj:\n${entry.text}`,
+    category: "BUG",
+    priority: "MEDIUM",
+    estimatedMinutes: 0,
+  };
+  return createAyesTask(taskDraft);
+}
+
+async function makeCustomerReply(entry, instruction) {
+  return runWasenderAgent(
+    entry.sender,
+    [
+      "Aşağıdakı müştəri WhatsApp mesajına yekun cavab hazırla.",
+      "Yalnız müştəriyə göndəriləcək cavabı yaz; başlıq, texniki analiz və daxili məlumat əlavə etmə.",
+      "Cavab nəzakətli, müştəri yönümlü, aydın və qısa olsun.",
+      "Təsdiqlənməyən vaxt və nəticə vəd etmə. Texniki terminləri yalnız müştəri üçün vacibdirsə işlət.",
+      `Müştəri mesajı: ${entry.text}`,
+      `Daxili texniki analiz: ${entry.analysis}`,
+      `Sahibin göstərişi: ${instruction}`,
+    ].join("\n\n"),
+    entry.agentId || WASENDER_AGENT_ID,
+  );
+}
+
+async function processProjectApprovalMessage(inbound, flow) {
+  const parsed = parseApprovalInstruction(inbound.text);
+  const entry = latestPendingApproval(parsed?.code || "", flow.approvalGroupJid);
+
+  if (!entry) {
+    const answer = await runWasenderAgent(
+      `approval-${flow.approvalGroupJid}`,
+      [
+        `Bu mesaj ${flow.name} layihəsinin sahibindən daxili BA qrupunda gəlir.`,
+        "Cavad biznes analitiki kimi normal söhbət et. Müştəri qrupuna heç nə göndərmə.",
+        `Sahibin mesajı: ${inbound.text}`,
+      ].join("\n\n"),
+      flow.agentId,
+    );
+    await sendWasenderLongText(flow.approvalGroupJid, answer);
+    return;
+  }
+
+  const plan = await planProjectApproval(entry, inbound.text);
+  if (plan.action === "discuss") {
+    const answer = await runWasenderAgent(
+      entry.sender,
+      [
+        "Sahib müştəriyə cavab göndərmədən məsələ barədə daxili izah istəyir.",
+        "Azərbaycan dilində texniki, aydın və praktik cavab ver.",
+        `Müştəri mesajı: ${entry.text}`,
+        `Əvvəlki analiz: ${entry.analysis}`,
+        `Sahibin sualı: ${inbound.text}`,
+      ].join("\n\n"),
+      entry.agentId || flow.agentId,
+    );
+    await sendWasenderLongText(flow.approvalGroupJid, answer);
+    return;
+  }
+
+  if (plan.action === "skip") {
+    entry.status = "skipped";
+    entry.decidedAt = new Date().toISOString();
+    saveWasenderPending();
+    await sendWasenderText(flow.approvalGroupJid, `${entry.code} keçildi. Müştəri qrupuna cavab göndərilmədi.`);
+    return;
+  }
+
+  const results = [];
+  if (plan.action === "task" || plan.action === "task-and-reply") {
+    const createdTask = await createProjectTask(entry);
+    entry.task = { id: createdTask.id, number: createdTask.number, title: createdTask.title };
+    entry.status = "task-created";
+    entry.decidedAt = new Date().toISOString();
+    saveWasenderPending();
+    results.push(`${createdTask.number || "Task"} yaradıldı: ${createdTask.title || "Müştəri müraciəti"}`);
+  }
+
+  if (plan.action === "reply" || plan.action === "task-and-reply") {
+    const replyInstruction =
+      plan.replyInstruction ||
+      "Məsələnin qeydə alındığını və üzərində işləyəcəyimizi nəzakətlə bildir.";
+    const customerReply = await makeCustomerReply(entry, replyInstruction);
+    await sendWasenderLongText(entry.sender, customerReply);
+    entry.finalReply = customerReply;
+    entry.status = entry.task ? "task-created-and-replied" : "replied";
+    entry.decidedAt = new Date().toISOString();
+    saveWasenderPending();
+    results.push("Müştəri qrupuna nəzakətli cavab göndərildi.");
+  }
+
+  await sendWasenderLongText(flow.approvalGroupJid, `✅ ${entry.code}\n${results.join("\n")}`);
+}
+
+async function processProjectIntakeMessage(inbound, flow) {
+  const analysis = await runWasenderAgent(
+    inbound.sender,
+    [
+      `Yeni mesaj ${flow.name} müştəri qrupundan gəlib.`,
+      "AEM biznes analitiki kimi problemi anla və lazım olsa layihə repolarını araşdır.",
+      "Hələ müştəriyə cavab vermə. Layihə sahibinə Azərbaycan dilində texniki və aydın hesabat hazırla.",
+      "Bölmələr: Qısa məzmun, Ehtimal olunan səbəb, Kod/sistem tapıntısı, Tövsiyə, Task lazımdır (Bəli/Xeyr), Müştəriyə təklif olunan cavab.",
+      `Yazan: ${inbound.participant ? `+${inbound.participant}` : "qrup iştirakçısı"}`,
+      `Mesaj: ${inbound.text}`,
+    ].join("\n\n"),
+    flow.agentId,
+  );
+  const code = makeApprovalCode(inbound.id || `${inbound.sender}-${Date.now()}`);
+  const entry = {
+    code,
+    sender: inbound.sender,
+    participant: inbound.participant || "",
+    isGroup: true,
+    sourceName: flow.intakeGroupName || flow.name,
+    flowName: flow.name,
+    approvalTarget: flow.approvalGroupJid,
+    agentId: flow.agentId,
+    text: inbound.text,
+    analysis,
+    status: "pending",
+    createdAt: new Date().toISOString(),
+  };
+  wasenderPending[code] = entry;
+  saveWasenderPending();
+  await sendWasenderLongText(flow.approvalGroupJid, approvalNotice(entry));
+}
+
 async function processWasenderMessage(inbound) {
   const agentMessage =
     `Yeni WhatsApp mesajını AEM biznes analitiki kimi araşdır. Lazım olsa kod repolarına bax. ` +
@@ -848,10 +1107,21 @@ app.post("/hooks/wasender", (req, res) => {
   const directGroupAgentId = inbound.isGroup
     ? WASENDER_GROUP_AGENT_ROUTES.get(inbound.sender) || ""
     : "";
+  const approvalFlow = inbound.isGroup
+    ? WASENDER_PROJECT_FLOWS.find((flow) => flow.approvalGroupJid === inbound.sender) || null
+    : null;
   const isOwnerInstruction =
     Boolean(WASENDER_ADMIN_NUMBER) && !inbound.isGroup && inbound.sender === WASENDER_ADMIN_NUMBER;
+  const isProjectOwnerInstruction = Boolean(
+    approvalFlow &&
+      WASENDER_ADMIN_NUMBER &&
+      inbound.participant === WASENDER_ADMIN_NUMBER,
+  );
   if (inbound.isGroup && !WASENDER_ALLOW_GROUPS) {
     return res.json({ ok: true, ignored: true, reason: "groups disabled" });
+  }
+  if (approvalFlow && !isProjectOwnerInstruction) {
+    return res.json({ ok: true, ignored: true, reason: "approval sender not allowed" });
   }
   if (!isOwnerInstruction && !wasenderSenderAllowed(inbound.sender)) {
     return res.json({ ok: true, ignored: true, reason: "sender not allowed" });
@@ -864,15 +1134,35 @@ app.post("/hooks/wasender", (req, res) => {
 
   const queueKey = isOwnerInstruction ? `owner-${WASENDER_ADMIN_NUMBER}` : inbound.sender;
   const previous = wasenderSenderQueues.get(queueKey) || Promise.resolve();
+  let activeProjectFlow = approvalFlow;
   const current = previous
     .then(async () => {
       if (inbound.audio) inbound.text = await transcribeWasenderVoice(inbound);
       if (isOwnerInstruction) return processOwnerInstruction(inbound);
+      if (approvalFlow) return processProjectApprovalMessage(inbound, approvalFlow);
+      if (inbound.isGroup) {
+        const intakeFlow = await resolveProjectIntakeFlow(inbound.sender);
+        if (intakeFlow) {
+          activeProjectFlow = intakeFlow;
+          return processProjectIntakeMessage(inbound, intakeFlow);
+        }
+      }
       if (directGroupAgentId) return processDirectGroupMessage(inbound, directGroupAgentId);
       return processWasenderMessage(inbound);
     })
     .catch(async (err) => {
       console.error(`[wasender] ${inbound.sender}: ${String(err)}`);
+      if (activeProjectFlow) {
+        try {
+          await sendWasenderText(
+            activeProjectFlow.approvalGroupJid,
+            `Əməliyyatı yerinə yetirmək alınmadı: ${String(err?.message || err).slice(0, 500)}`,
+          );
+        } catch (notifyError) {
+          console.error(`[wasender] project flow error notification failed: ${String(notifyError)}`);
+        }
+        return;
+      }
       if (inbound.audio && (directGroupAgentId || WASENDER_ADMIN_NUMBER)) {
         try {
           await sendWasenderText(
