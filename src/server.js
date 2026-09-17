@@ -11,7 +11,9 @@ import * as tar from "tar";
 import {
   chunkText,
   extractAgentText,
+  makeApprovalCode,
   normalizeWasenderSender,
+  parseApprovalInstruction,
   parseWasenderInbound,
   safeEqual,
 } from "./wasender-bridge.js";
@@ -58,6 +60,7 @@ const WASENDER_WEBHOOK_SECRET = process.env.WASENDER_WEBHOOK_SECRET?.trim();
 const WASENDER_AGENT_ID = process.env.WASENDER_AGENT_ID?.trim() || "cavad-aem-ba";
 const WASENDER_PROVIDER = process.env.WASENDER_PROVIDER?.trim().toLowerCase() || "wasenderapi";
 const WASENDER_ALLOW_GROUPS = process.env.WASENDER_ALLOW_GROUPS === "true";
+const WASENDER_ADMIN_NUMBER = normalizeWasenderSender(process.env.WASENDER_ADMIN_NUMBER || "");
 const WASENDER_ALLOWED_SENDERS = new Set(
   (process.env.WASENDER_ALLOWED_SENDERS || "")
     .split(",")
@@ -383,6 +386,28 @@ app.get("/healthz", async (_req, res) => {
 
 const wasenderSeenIds = new Set();
 const wasenderSenderQueues = new Map();
+const WASENDER_PENDING_PATH = path.join(STATE_DIR, "wasender-pending.json");
+let wasenderPending = loadWasenderPending();
+
+function loadWasenderPending() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(WASENDER_PENDING_PATH, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveWasenderPending() {
+  fs.mkdirSync(path.dirname(WASENDER_PENDING_PATH), { recursive: true });
+  const entries = Object.entries(wasenderPending)
+    .sort((a, b) => String(b[1]?.createdAt).localeCompare(String(a[1]?.createdAt)))
+    .slice(0, 200);
+  wasenderPending = Object.fromEntries(entries);
+  const temporary = `${WASENDER_PENDING_PATH}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(wasenderPending, null, 2), { mode: 0o600 });
+  fs.renameSync(temporary, WASENDER_PENDING_PATH);
+}
 
 function wasenderSenderAllowed(sender) {
   return WASENDER_ALLOWED_SENDERS.has("*") || WASENDER_ALLOWED_SENDERS.has(sender);
@@ -420,12 +445,8 @@ async function sendWasenderText(to, text) {
   }
 }
 
-async function processWasenderMessage(inbound) {
-  const sessionSender = inbound.sender.replace(/[^a-zA-Z0-9_-]/g, "-");
-  const agentMessage =
-    inbound.isGroup && inbound.participant
-      ? `[WhatsApp group message from +${inbound.participant}]\n${inbound.text}`
-      : inbound.text;
+async function runWasenderAgent(sessionSender, message) {
+  const safeSessionSender = sessionSender.replace(/[^a-zA-Z0-9_-]/g, "-");
   const result = await runCmd(
     OPENCLAW_NODE,
     clawArgs([
@@ -433,9 +454,9 @@ async function processWasenderMessage(inbound) {
       "--agent",
       WASENDER_AGENT_ID,
       "--session-key",
-      `agent:${WASENDER_AGENT_ID}:wasender-${sessionSender}`,
+      `agent:${WASENDER_AGENT_ID}:wasender-${safeSessionSender}`,
       "--message",
-      agentMessage,
+      message,
       "--json",
       "--timeout",
       "300",
@@ -447,8 +468,131 @@ async function processWasenderMessage(inbound) {
   }
   const answer = extractAgentText(result.output);
   if (!answer) throw new Error("OpenClaw agent returned no text reply");
-  for (const message of chunkText(answer)) {
-    await sendWasenderText(inbound.sender, message);
+  return answer;
+}
+
+async function sendWasenderLongText(to, text) {
+  for (const message of chunkText(text)) await sendWasenderText(to, message);
+}
+
+function latestPendingApproval(code = "") {
+  if (code) return wasenderPending[code] || null;
+  return (
+    Object.values(wasenderPending)
+      .filter((entry) => entry.status === "pending")
+      .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0] || null
+  );
+}
+
+function approvalNotice(entry) {
+  const source = entry.isGroup
+    ? `Qrup: ${entry.sender}${entry.participant ? `\nYazan: +${entry.participant}` : ""}`
+    : `Şəxsi mesaj: +${entry.sender}`;
+  return [
+    `📩 ${entry.code} — yeni AEM mesajı`,
+    source,
+    `\nMesaj:\n${entry.text}`,
+    `\nCavadın analizi:\n${entry.analysis}`,
+    "\nƏmr yazın:",
+    `${entry.code} CAVAB`,
+    `${entry.code} TASK`,
+    `${entry.code} YAZ: sizin mətniniz`,
+    `${entry.code} KEÇ`,
+  ].join("\n");
+}
+
+async function processOwnerInstruction(inbound) {
+  const command = parseApprovalInstruction(inbound.text);
+  if (!command) return;
+  const entry = latestPendingApproval(command.code);
+  if (!entry) {
+    await sendWasenderText(WASENDER_ADMIN_NUMBER, "Gözləyən mesaj tapılmadı. Əmrdə WA-kodunu yoxlayın.");
+    return;
+  }
+
+  if (command.action === "skip") {
+    entry.status = "skipped";
+    entry.decidedAt = new Date().toISOString();
+    saveWasenderPending();
+    await sendWasenderText(WASENDER_ADMIN_NUMBER, `${entry.code} keçildi.`);
+    return;
+  }
+
+  if (command.action === "task") {
+    const taskDraft = await runWasenderAgent(
+      entry.sender,
+      [
+        "Sahib bu WhatsApp məsələsi üçün task açılmasını istəyir.",
+        "Task sistemi hələ qoşulmayıb. Azərbaycan dilində hazır task mətni tərtib et:",
+        "Başlıq, təsvir, faktiki nəticə, gözlənilən nəticə, təsirlənən hissə, qəbul meyarları.",
+        `Orijinal mesaj: ${entry.text}`,
+        `Əvvəlki analiz: ${entry.analysis}`,
+      ].join("\n\n"),
+    );
+    entry.status = "task-drafted";
+    entry.decidedAt = new Date().toISOString();
+    entry.taskDraft = taskDraft;
+    saveWasenderPending();
+    await sendWasenderLongText(
+      WASENDER_ADMIN_NUMBER,
+      `${entry.code} üçün task mətni hazırdır. Task sistemi qoşulan kimi avtomatik açılacaq:\n\n${taskDraft}`,
+    );
+    return;
+  }
+
+  let finalReply;
+  if (command.action === "custom-reply") {
+    finalReply = command.text;
+  } else {
+    const ownerInstruction =
+      command.action === "instruction" ? command.text : "Təklif etdiyin uyğun cavabı göndər.";
+    finalReply = await runWasenderAgent(
+      entry.sender,
+      [
+        "Aşağıdakı WhatsApp mesajına cavab vermək sahib tərəfindən təsdiqləndi.",
+        "Yalnız qarşı tərəfə göndəriləcək yekun cavab mətnini yaz. Əlavə izah və başlıq yazma.",
+        `Orijinal mesaj: ${entry.text}`,
+        `Əvvəlki analiz: ${entry.analysis}`,
+        `Sahibin göstərişi: ${ownerInstruction}`,
+      ].join("\n\n"),
+    );
+  }
+
+  await sendWasenderLongText(entry.sender, finalReply);
+  entry.status = "replied";
+  entry.decidedAt = new Date().toISOString();
+  entry.finalReply = finalReply;
+  saveWasenderPending();
+  await sendWasenderText(WASENDER_ADMIN_NUMBER, `${entry.code} cavablandırıldı.`);
+}
+
+async function processWasenderMessage(inbound) {
+  const agentMessage =
+    `Yeni WhatsApp mesajını AEM biznes analitiki kimi araşdır. Lazım olsa kod repolarına bax. ` +
+    `Hələ qarşı tərəfə cavab göndərmə. Azərbaycan dilində qısa şəkildə Xülasə, Tapıntı, ` +
+    `Tövsiyə olunan cavab və Task lazımdır (Bəli/Xeyr) bölmələri ilə sahibə hesabat hazırla.\n\n` +
+    (inbound.isGroup && inbound.participant
+      ? `Qrup mesajı, yazan +${inbound.participant}:\n${inbound.text}`
+      : `Şəxsi mesaj, yazan +${inbound.sender}:\n${inbound.text}`);
+  const answer = await runWasenderAgent(inbound.sender, agentMessage);
+
+  if (WASENDER_ADMIN_NUMBER) {
+    const code = makeApprovalCode(inbound.id || `${inbound.sender}-${Date.now()}`);
+    const entry = {
+      code,
+      sender: inbound.sender,
+      participant: inbound.participant || "",
+      isGroup: inbound.isGroup,
+      text: inbound.text,
+      analysis: answer,
+      status: "pending",
+      createdAt: new Date().toISOString(),
+    };
+    wasenderPending[code] = entry;
+    saveWasenderPending();
+    await sendWasenderLongText(WASENDER_ADMIN_NUMBER, approvalNotice(entry));
+  } else {
+    await sendWasenderLongText(inbound.sender, answer);
   }
 }
 
@@ -466,10 +610,12 @@ app.post("/hooks/wasender", (req, res) => {
 
   const inbound = parseWasenderInbound(req.body);
   if (!inbound) return res.json({ ok: true, ignored: true });
+  const isOwnerInstruction =
+    Boolean(WASENDER_ADMIN_NUMBER) && !inbound.isGroup && inbound.sender === WASENDER_ADMIN_NUMBER;
   if (inbound.isGroup && !WASENDER_ALLOW_GROUPS) {
     return res.json({ ok: true, ignored: true, reason: "groups disabled" });
   }
-  if (!wasenderSenderAllowed(inbound.sender)) {
+  if (!isOwnerInstruction && !wasenderSenderAllowed(inbound.sender)) {
     return res.json({ ok: true, ignored: true, reason: "sender not allowed" });
   }
   if (!rememberWasenderMessage(inbound.id)) {
@@ -478,16 +624,17 @@ app.post("/hooks/wasender", (req, res) => {
 
   res.json({ ok: true, accepted: true });
 
-  const previous = wasenderSenderQueues.get(inbound.sender) || Promise.resolve();
+  const queueKey = isOwnerInstruction ? `owner-${WASENDER_ADMIN_NUMBER}` : inbound.sender;
+  const previous = wasenderSenderQueues.get(queueKey) || Promise.resolve();
   const current = previous
-    .then(() => processWasenderMessage(inbound))
+    .then(() => (isOwnerInstruction ? processOwnerInstruction(inbound) : processWasenderMessage(inbound)))
     .catch((err) => console.error(`[wasender] ${inbound.sender}: ${String(err)}`))
     .finally(() => {
-      if (wasenderSenderQueues.get(inbound.sender) === current) {
-        wasenderSenderQueues.delete(inbound.sender);
+      if (wasenderSenderQueues.get(queueKey) === current) {
+        wasenderSenderQueues.delete(queueKey);
       }
     });
-  wasenderSenderQueues.set(inbound.sender, current);
+  wasenderSenderQueues.set(queueKey, current);
 });
 
 app.get("/setup/app.js", requireSetupAuth, (_req, res) => {

@@ -124,3 +124,34 @@ export function chunkText(text, maxLength = 3800) {
   if (remaining) chunks.push(remaining);
   return chunks;
 }
+
+export function makeApprovalCode(messageId) {
+  const value = String(messageId || crypto.randomUUID());
+  const suffix = crypto.createHash("sha256").update(value).digest("hex").slice(0, 6).toUpperCase();
+  return `WA-${suffix}`;
+}
+
+export function parseApprovalInstruction(value) {
+  const input = String(value || "").trim();
+  if (!input) return null;
+
+  const codeMatch = input.match(/\bWA-[A-F0-9]{6}\b/i);
+  const code = codeMatch ? codeMatch[0].toUpperCase() : "";
+  const instruction = (codeMatch ? input.replace(codeMatch[0], "") : input).trim();
+  const normalized = instruction.toLocaleLowerCase("az-AZ");
+
+  const customMatch = instruction.match(/^(?:yaz|de|cavab)\s*:\s*([\s\S]+)$/i);
+  if (customMatch?.[1]?.trim()) {
+    return { code, action: "custom-reply", text: customMatch[1].trim() };
+  }
+  if (/^(?:cavab|cavabla|cavab yaz|göndər|gonder|reply|send)$/.test(normalized)) {
+    return { code, action: "reply", text: "" };
+  }
+  if (/^(?:task|task aç|task ac|tapşırıq aç|tapsiriq ac)$/.test(normalized)) {
+    return { code, action: "task", text: "" };
+  }
+  if (/^(?:keç|kec|ötür|otur|ignore|sil)$/.test(normalized)) {
+    return { code, action: "skip", text: "" };
+  }
+  return { code, action: "instruction", text: instruction };
+}

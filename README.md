@@ -39,6 +39,7 @@ Optional:
 - `WASENDER_WEBHOOK_SECRET` — secret also configured in the WAsender webhook
 - `WASENDER_ALLOWED_SENDERS` — comma-separated WhatsApp numbers allowed to use the agent, without `+`; use `*` only if public access is intentional
 - `WASENDER_AGENT_ID=cavad-aem-ba` — OpenClaw agent that answers incoming messages
+- `WASENDER_ADMIN_NUMBER` — owner number without `+`; when set, Cavad asks this number for approval before replying
 - `WASENDER_PROVIDER=wasenderapi` — use `wasender-dev` only for the separate wasender.dev service
 - `WASENDER_ALLOW_GROUPS=true` — optional; subscribe to `messages-group.received` in WAsender when enabled
 

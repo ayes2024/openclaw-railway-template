@@ -4,7 +4,9 @@ import assert from "node:assert/strict";
 import {
   chunkText,
   extractAgentText,
+  makeApprovalCode,
   normalizeWasenderSender,
+  parseApprovalInstruction,
   parseWasenderInbound,
   safeEqual,
 } from "../src/wasender-bridge.js";
@@ -80,4 +82,24 @@ test("normalizes senders, compares secrets, and chunks replies", () => {
   assert.equal(safeEqual("secret", "secret"), true);
   assert.equal(safeEqual("secret", "wrong"), false);
   assert.deepEqual(chunkText("12345 67890", 7), ["12345", "67890"]);
+});
+
+test("creates stable approval codes and parses owner commands", () => {
+  assert.equal(makeApprovalCode("message-1"), makeApprovalCode("message-1"));
+  assert.match(makeApprovalCode("message-1"), /^WA-[A-F0-9]{6}$/);
+  assert.deepEqual(parseApprovalInstruction("WA-A1B2C3 CAVAB"), {
+    code: "WA-A1B2C3",
+    action: "reply",
+    text: "",
+  });
+  assert.deepEqual(parseApprovalInstruction("yaz: Sabah yoxlayacağıq"), {
+    code: "",
+    action: "custom-reply",
+    text: "Sabah yoxlayacağıq",
+  });
+  assert.deepEqual(parseApprovalInstruction("task aç"), {
+    code: "",
+    action: "task",
+    text: "",
+  });
 });
