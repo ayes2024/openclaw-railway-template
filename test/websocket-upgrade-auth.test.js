@@ -14,3 +14,9 @@ test("ws upgrade handler does not enforce Basic auth (browsers can't send header
   assert.doesNotMatch(window, /scheme === "Basic"/);
   assert.doesNotMatch(window, /WWW-Authenticate/);
 });
+
+test("Control UI HTTP proxy does not enforce Basic auth", () => {
+  const src = fs.readFileSync(new URL("../src/server.js", import.meta.url), "utf8");
+  assert.doesNotMatch(src, /function requireDashboardAuth/);
+  assert.match(src, /function requireSetupAuth/);
+});
