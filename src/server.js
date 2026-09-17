@@ -594,6 +594,24 @@ function approvalNotice(entry) {
 async function processOwnerInstruction(inbound) {
   const command = parseApprovalInstruction(inbound.text);
   if (!command) return;
+
+  // Messages without an approval code or a known short command are ordinary
+  // conversations with Cavad. Keep this in a separate owner session so the
+  // owner can ask follow-up questions naturally without affecting customer chats.
+  if (!command.code && command.action === "instruction") {
+    const answer = await runWasenderAgent(
+      `owner-${WASENDER_ADMIN_NUMBER}`,
+      [
+        "Bu mesaj AEM layihəsinin sahibindən birbaşa sənə gəlir.",
+        "Cavad AEM biznes analitiki kimi normal söhbət et və suala cavab ver.",
+        "Lazım olduqda layihə repolarını araşdır. Qarşı tərəfə mesaj göndərmə; yalnız sahibə cavab yaz.",
+        `Sahibin mesajı: ${command.text}`,
+      ].join("\n\n"),
+    );
+    await sendWasenderLongText(WASENDER_ADMIN_NUMBER, answer);
+    return;
+  }
+
   const entry = latestPendingApproval(command.code);
   if (!entry) {
     await sendWasenderText(WASENDER_ADMIN_NUMBER, "Gözləyən mesaj tapılmadı. Əmrdə WA-kodunu yoxlayın.");

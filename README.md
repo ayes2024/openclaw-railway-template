@@ -40,6 +40,7 @@ Optional:
 - `WASENDER_ALLOWED_SENDERS` — comma-separated WhatsApp numbers allowed to use the agent, without `+`; use `*` only if public access is intentional
 - `WASENDER_AGENT_ID=cavad-aem-ba` — OpenClaw agent that answers incoming messages
 - `WASENDER_ADMIN_NUMBER` — owner number without `+`; when set, Cavad asks this number for approval before replying
+  Messages from this number without a `WA-XXXXXX` approval command are treated as a private chat with the agent.
 - `WASENDER_PROVIDER=wasenderapi` — use `wasender-dev` only for the separate wasender.dev service
 - `WASENDER_ALLOW_GROUPS=true` — optional; subscribe to `messages-group.received` in WAsender when enabled
 - `AYES_TASK_URL`, `AYES_TASK_EMAIL`, `AYES_TASK_PASSWORD` — Cavad's AYES Task account
