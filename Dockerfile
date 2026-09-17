@@ -21,9 +21,9 @@ RUN corepack enable
 WORKDIR /openclaw
 
 # Pin to a known-good branch in the ayes2024 fork. Override in Railway settings if needed.
-# The branch points at the tested v2026.3.8 release and keeps deployments under
+# The branch points at the v2026.9.4 release and keeps deployments under
 # the ayes2024 GitHub account instead of pulling source directly from upstream.
-ARG OPENCLAW_GIT_REF=railway-v2026.3.8
+ARG OPENCLAW_GIT_REF=railway-v2026.9.4
 RUN git clone --depth 1 --branch "${OPENCLAW_GIT_REF}" https://github.com/ayes2024/openclaw.git .
 
 # Patch: relax version requirements for packages that may reference unpublished versions.
