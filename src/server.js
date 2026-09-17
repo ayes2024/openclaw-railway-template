@@ -60,6 +60,7 @@ const WASENDER_WEBHOOK_SECRET = process.env.WASENDER_WEBHOOK_SECRET?.trim();
 const WASENDER_AGENT_ID = process.env.WASENDER_AGENT_ID?.trim() || "cavad-aem-ba";
 const WASENDER_PROVIDER = process.env.WASENDER_PROVIDER?.trim().toLowerCase() || "wasenderapi";
 const WASENDER_ALLOW_GROUPS = process.env.WASENDER_ALLOW_GROUPS === "true";
+const WASENDER_GROUP_AGENT_ROUTES = parseGroupAgentRoutes(process.env.WASENDER_GROUP_AGENT_ROUTES);
 const WASENDER_ADMIN_NUMBER = normalizeWasenderSender(process.env.WASENDER_ADMIN_NUMBER || "");
 const WASENDER_ALLOWED_SENDERS = new Set(
   (process.env.WASENDER_ALLOWED_SENDERS || "")
@@ -86,6 +87,21 @@ const OPENAI_TRANSCRIBE_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL?.trim() || "
 
 function splitIds(value) {
   return String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function parseGroupAgentRoutes(value) {
+  if (!value?.trim()) return new Map();
+  try {
+    const parsed = JSON.parse(value);
+    return new Map(
+      Object.entries(parsed)
+        .map(([groupJid, agentId]) => [normalizeWasenderSender(groupJid), String(agentId || "").trim()])
+        .filter(([groupJid, agentId]) => groupJid.endsWith("@g.us") && agentId),
+    );
+  } catch {
+    console.warn("[wasender] WASENDER_GROUP_AGENT_ROUTES must be a JSON object");
+    return new Map();
+  }
 }
 
 function ayesTaskConfigured() {
@@ -542,16 +558,16 @@ async function transcribeWasenderVoice(inbound) {
   return text;
 }
 
-async function runWasenderAgent(sessionSender, message) {
+async function runWasenderAgent(sessionSender, message, agentId = WASENDER_AGENT_ID) {
   const safeSessionSender = sessionSender.replace(/[^a-zA-Z0-9_-]/g, "-");
   const result = await runCmd(
     OPENCLAW_NODE,
     clawArgs([
       "agent",
       "--agent",
-      WASENDER_AGENT_ID,
+      agentId,
       "--session-key",
-      `agent:${WASENDER_AGENT_ID}:wasender-${safeSessionSender}`,
+      `agent:${agentId}:wasender-${safeSessionSender}`,
       "--message",
       message,
       "--json",
@@ -799,6 +815,22 @@ async function processWasenderMessage(inbound) {
   }
 }
 
+async function processDirectGroupMessage(inbound, agentId) {
+  const author = inbound.participant ? `+${inbound.participant}` : "qrup iştirakçısı";
+  const answer = await runWasenderAgent(
+    inbound.sender,
+    [
+      "Bu mesaj sənə aid xüsusi WhatsApp layihə qrupundan gəlir.",
+      "Cavad AEM biznes analitiki kimi normal söhbət et və suala birbaşa cavab ver.",
+      "Lazım olduqda AEM layihə repolarını araşdır. Cavabını Azərbaycan dilində, aydın və praktik yaz.",
+      `Yazan: ${author}`,
+      `Mesaj: ${inbound.text}`,
+    ].join("\n\n"),
+    agentId,
+  );
+  await sendWasenderLongText(inbound.sender, answer);
+}
+
 // WAsender expects a quick 200 response. Agent work continues in a per-sender
 // queue, preserving conversation order and a separate OpenClaw session per user.
 app.post("/hooks/wasender", (req, res) => {
@@ -813,6 +845,9 @@ app.post("/hooks/wasender", (req, res) => {
 
   const inbound = parseWasenderInbound(req.body);
   if (!inbound) return res.json({ ok: true, ignored: true });
+  const directGroupAgentId = inbound.isGroup
+    ? WASENDER_GROUP_AGENT_ROUTES.get(inbound.sender) || ""
+    : "";
   const isOwnerInstruction =
     Boolean(WASENDER_ADMIN_NUMBER) && !inbound.isGroup && inbound.sender === WASENDER_ADMIN_NUMBER;
   if (inbound.isGroup && !WASENDER_ALLOW_GROUPS) {
@@ -832,14 +867,16 @@ app.post("/hooks/wasender", (req, res) => {
   const current = previous
     .then(async () => {
       if (inbound.audio) inbound.text = await transcribeWasenderVoice(inbound);
-      return isOwnerInstruction ? processOwnerInstruction(inbound) : processWasenderMessage(inbound);
+      if (isOwnerInstruction) return processOwnerInstruction(inbound);
+      if (directGroupAgentId) return processDirectGroupMessage(inbound, directGroupAgentId);
+      return processWasenderMessage(inbound);
     })
     .catch(async (err) => {
       console.error(`[wasender] ${inbound.sender}: ${String(err)}`);
-      if (inbound.audio && WASENDER_ADMIN_NUMBER) {
+      if (inbound.audio && (directGroupAgentId || WASENDER_ADMIN_NUMBER)) {
         try {
           await sendWasenderText(
-            WASENDER_ADMIN_NUMBER,
+            directGroupAgentId ? inbound.sender : WASENDER_ADMIN_NUMBER,
             "Səsli mesajı mətnə çevirmək alınmadı. Zəhmət olmasa mətni yazılı göndərin.",
           );
         } catch (notifyError) {
