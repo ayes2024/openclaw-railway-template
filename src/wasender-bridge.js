@@ -39,6 +39,9 @@ export function parseWasenderInbound(payload) {
   const key = message.key || data.key || {};
   if (key.fromMe === true || message.fromMe === true || data.fromMe === true) return null;
 
+  const rawMessage = message.message || data.message?.message || {};
+  const audio = rawMessage.audioMessage || message.audioMessage || data.audioMessage || null;
+
   const text = String(
     message.messageBody ||
       message.text ||
@@ -51,7 +54,7 @@ export function parseWasenderInbound(payload) {
       payload.body ||
       "",
   ).trim();
-  if (!text) return null;
+  if (!text && !audio) return null;
 
   const rawSender =
     key.cleanedSenderPn ||
@@ -82,8 +85,14 @@ export function parseWasenderInbound(payload) {
   );
 
   const id = String(key.id || message.id || data.id || payload.id || "").trim();
-  const inbound = { id, sender, text, isGroup: sender.endsWith("@g.us") };
+  const inbound = {
+    id,
+    sender,
+    text: text || "[Səsli mesaj]",
+    isGroup: sender.endsWith("@g.us"),
+  };
   if (participant) inbound.participant = participant;
+  if (audio) inbound.audio = audio;
   return inbound;
 }
 

@@ -81,6 +81,8 @@ const AYES_TASK_TYPE_ID = process.env.AYES_TASK_TYPE_ID?.trim();
 const AYES_TASK_EXECUTOR_IDS = splitIds(process.env.AYES_TASK_EXECUTOR_IDS);
 const AYES_TASK_REVIEWER_IDS = splitIds(process.env.AYES_TASK_REVIEWER_IDS);
 const AYES_TASK_APPROVER_IDS = splitIds(process.env.AYES_TASK_APPROVER_IDS);
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY?.trim();
+const OPENAI_TRANSCRIBE_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL?.trim() || "gpt-4o-mini-transcribe";
 
 function splitIds(value) {
   return String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
@@ -460,6 +462,7 @@ async function sendWasenderText(to, text) {
     headers: {
       Authorization: `Bearer ${WASENDER_API_KEY}`,
       "Content-Type": "application/json",
+      "User-Agent": "Mozilla/5.0",
     },
     body: JSON.stringify(payload),
     signal: AbortSignal.timeout(30_000),
@@ -468,6 +471,75 @@ async function sendWasenderText(to, text) {
     const detail = (await response.text()).slice(0, 1_000);
     throw new Error(`WAsender send failed (${response.status}): ${detail}`);
   }
+}
+
+function voiceFileExtension(mimetype) {
+  const type = String(mimetype || "").toLowerCase();
+  if (type.includes("ogg") || type.includes("opus")) return "ogg";
+  if (type.includes("mpeg") || type.includes("mp3")) return "mp3";
+  if (type.includes("mp4") || type.includes("m4a")) return "m4a";
+  if (type.includes("wav")) return "wav";
+  if (type.includes("webm")) return "webm";
+  return "ogg";
+}
+
+async function transcribeWasenderVoice(inbound) {
+  if (!inbound.audio) return inbound.text;
+  if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY is required for voice transcription");
+
+  const decrypted = await fetch("https://www.wasenderapi.com/api/decrypt-media", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${WASENDER_API_KEY}`,
+      "Content-Type": "application/json",
+      "User-Agent": "Mozilla/5.0",
+    },
+    body: JSON.stringify({
+      data: {
+        messages: {
+          key: { id: inbound.id },
+          message: { audioMessage: inbound.audio },
+        },
+      },
+    }),
+    signal: AbortSignal.timeout(30_000),
+  });
+  const decryptedBody = await decrypted.json().catch(() => ({}));
+  if (!decrypted.ok || !decryptedBody.publicUrl) {
+    throw new Error(`WAsender audio decrypt failed (${decrypted.status})`);
+  }
+
+  const audioResponse = await fetch(decryptedBody.publicUrl, {
+    signal: AbortSignal.timeout(60_000),
+  });
+  if (!audioResponse.ok) throw new Error(`WAsender audio download failed (${audioResponse.status})`);
+  const audioBytes = await audioResponse.arrayBuffer();
+  if (audioBytes.byteLength === 0 || audioBytes.byteLength > 25 * 1024 * 1024) {
+    throw new Error("Voice message is empty or exceeds 25 MiB");
+  }
+
+  const mimetype = String(inbound.audio.mimetype || "audio/ogg").split(";")[0];
+  const form = new FormData();
+  form.append(
+    "file",
+    new Blob([audioBytes], { type: mimetype }),
+    `voice-${inbound.id || Date.now()}.${voiceFileExtension(mimetype)}`,
+  );
+  form.append("model", OPENAI_TRANSCRIBE_MODEL);
+  form.append("response_format", "json");
+
+  const transcription = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
+    body: form,
+    signal: AbortSignal.timeout(120_000),
+  });
+  const transcriptionBody = await transcription.json().catch(() => ({}));
+  const text = String(transcriptionBody.text || "").trim();
+  if (!transcription.ok || !text) {
+    throw new Error(`OpenAI voice transcription failed (${transcription.status})`);
+  }
+  return text;
 }
 
 async function runWasenderAgent(sessionSender, message) {
@@ -758,8 +830,23 @@ app.post("/hooks/wasender", (req, res) => {
   const queueKey = isOwnerInstruction ? `owner-${WASENDER_ADMIN_NUMBER}` : inbound.sender;
   const previous = wasenderSenderQueues.get(queueKey) || Promise.resolve();
   const current = previous
-    .then(() => (isOwnerInstruction ? processOwnerInstruction(inbound) : processWasenderMessage(inbound)))
-    .catch((err) => console.error(`[wasender] ${inbound.sender}: ${String(err)}`))
+    .then(async () => {
+      if (inbound.audio) inbound.text = await transcribeWasenderVoice(inbound);
+      return isOwnerInstruction ? processOwnerInstruction(inbound) : processWasenderMessage(inbound);
+    })
+    .catch(async (err) => {
+      console.error(`[wasender] ${inbound.sender}: ${String(err)}`);
+      if (inbound.audio && WASENDER_ADMIN_NUMBER) {
+        try {
+          await sendWasenderText(
+            WASENDER_ADMIN_NUMBER,
+            "Səsli mesajı mətnə çevirmək alınmadı. Zəhmət olmasa mətni yazılı göndərin.",
+          );
+        } catch (notifyError) {
+          console.error(`[wasender] voice error notification failed: ${String(notifyError)}`);
+        }
+      }
+    })
     .finally(() => {
       if (wasenderSenderQueues.get(queueKey) === current) {
         wasenderSenderQueues.delete(queueKey);

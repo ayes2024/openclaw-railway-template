@@ -41,6 +41,7 @@ Optional:
 - `WASENDER_AGENT_ID=cavad-aem-ba` — OpenClaw agent that answers incoming messages
 - `WASENDER_ADMIN_NUMBER` — owner number without `+`; when set, Cavad asks this number for approval before replying
   Messages from this number without a `WA-XXXXXX` approval command are treated as a private chat with the agent.
+- `OPENAI_API_KEY` — enables WhatsApp voice-note transcription with `gpt-4o-mini-transcribe`
 - `WASENDER_PROVIDER=wasenderapi` — use `wasender-dev` only for the separate wasender.dev service
 - `WASENDER_ALLOW_GROUPS=true` — optional; subscribe to `messages-group.received` in WAsender when enabled
 - `AYES_TASK_URL`, `AYES_TASK_EMAIL`, `AYES_TASK_PASSWORD` — Cavad's AYES Task account

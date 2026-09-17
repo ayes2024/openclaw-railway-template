@@ -68,6 +68,30 @@ test("parses a WAsenderAPI group message and keeps participant identity", () => 
   });
 });
 
+test("parses an incoming voice message without a text body", () => {
+  const audio = {
+    url: "https://example.com/encrypted-audio",
+    mediaKey: "base64-media-key",
+    mimetype: "audio/ogg; codecs=opus",
+  };
+  const message = parseWasenderInbound({
+    event: "messages.received",
+    data: {
+      messages: {
+        key: { id: "voice-1", fromMe: false, cleanedSenderPn: "994501234567" },
+        message: { audioMessage: audio },
+      },
+    },
+  });
+  assert.deepEqual(message, {
+    id: "voice-1",
+    sender: "994501234567",
+    text: "[Səsli mesaj]",
+    isGroup: false,
+    audio,
+  });
+});
+
 test("extracts agent reply text from CLI JSON", () => {
   const output = JSON.stringify({
     result: { payloads: [{ text: "Birinci" }, { text: "İkinci" }] },
