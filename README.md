@@ -9,6 +9,7 @@ This repo packages **OpenClaw** for Railway with a small **/setup** web wizard s
 - Persistent state via **Railway Volume** (so config/credentials/memory survive redeploys)
 - One-click **Export backup** (so users can migrate off Railway later)
 - **Import backup** from `/setup` (advanced recovery)
+- Optional **WAsender → OpenClaw agent bridge** at `/hooks/wasender`
 
 ## How it works (high level)
 
@@ -34,6 +35,14 @@ Recommended:
 
 Optional:
 - `OPENCLAW_GATEWAY_TOKEN` — if not set, the wrapper generates one (not ideal). In a template, set it using a generated secret.
+- `WASENDER_API_KEY` — WAsender session API key
+- `WASENDER_WEBHOOK_SECRET` — secret also configured in the WAsender webhook
+- `WASENDER_ALLOWED_SENDERS` — comma-separated WhatsApp numbers allowed to use the agent, without `+`; use `*` only if public access is intentional
+- `WASENDER_AGENT_ID=cavad-aem-ba` — OpenClaw agent that answers incoming messages
+- `WASENDER_PROVIDER=wasenderapi` — use `wasender-dev` only for the separate wasender.dev service
+- `WASENDER_ALLOW_GROUPS=true` — optional; groups are ignored by default
+
+WAsender webhook URL: `https://<your-app>.up.railway.app/hooks/wasender`. Subscribe to the incoming-message event and use the same secret as `WASENDER_WEBHOOK_SECRET`.
 
 Notes:
 - This template pins OpenClaw to a released version by default via Docker build arg `OPENCLAW_GIT_REF` (override if you want `main`).

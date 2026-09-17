@@ -8,6 +8,14 @@ import express from "express";
 import httpProxy from "http-proxy";
 import * as tar from "tar";
 
+import {
+  chunkText,
+  extractAgentText,
+  normalizeWasenderSender,
+  parseWasenderInbound,
+  safeEqual,
+} from "./wasender-bridge.js";
+
 // Migrate deprecated CLAWDBOT_* env vars → OPENCLAW_* so existing Railway deployments
 // keep working. Users should update their Railway Variables to use the new names.
 for (const suffix of ["PUBLIC_PORT", "STATE_DIR", "WORKSPACE_DIR", "GATEWAY_TOKEN", "CONFIG_PATH"]) {
@@ -42,6 +50,25 @@ const WORKSPACE_DIR =
 
 // Protect /setup with a user-provided password.
 const SETUP_PASSWORD = process.env.SETUP_PASSWORD?.trim();
+
+// Optional WAsender bridge. It stays disabled until all three secrets/access
+// controls below are configured in Railway Variables.
+const WASENDER_API_KEY = process.env.WASENDER_API_KEY?.trim();
+const WASENDER_WEBHOOK_SECRET = process.env.WASENDER_WEBHOOK_SECRET?.trim();
+const WASENDER_AGENT_ID = process.env.WASENDER_AGENT_ID?.trim() || "cavad-aem-ba";
+const WASENDER_PROVIDER = process.env.WASENDER_PROVIDER?.trim().toLowerCase() || "wasenderapi";
+const WASENDER_ALLOW_GROUPS = process.env.WASENDER_ALLOW_GROUPS === "true";
+const WASENDER_ALLOWED_SENDERS = new Set(
+  (process.env.WASENDER_ALLOWED_SENDERS || "")
+    .split(",")
+    .map(normalizeWasenderSender)
+    .filter(Boolean),
+);
+const WASENDER_API_URL =
+  process.env.WASENDER_API_URL?.trim() ||
+  (WASENDER_PROVIDER === "wasender-dev"
+    ? "https://api.wasender.dev/messages/text"
+    : "https://www.wasenderapi.com/api/send-message");
 
 // Gateway admin token (protects OpenClaw gateway + Control UI).
 // Must be stable across restarts. If not provided via env, persist it in the state dir.
@@ -352,6 +379,111 @@ app.get("/healthz", async (_req, res) => {
       lastDoctorAt,
     },
   });
+});
+
+const wasenderSeenIds = new Set();
+const wasenderSenderQueues = new Map();
+
+function wasenderSenderAllowed(sender) {
+  return WASENDER_ALLOWED_SENDERS.has("*") || WASENDER_ALLOWED_SENDERS.has(sender);
+}
+
+function rememberWasenderMessage(id) {
+  if (!id) return true;
+  if (wasenderSeenIds.has(id)) return false;
+  wasenderSeenIds.add(id);
+  if (wasenderSeenIds.size > 2_000) {
+    const oldest = wasenderSeenIds.values().next().value;
+    wasenderSeenIds.delete(oldest);
+  }
+  return true;
+}
+
+async function sendWasenderText(to, text) {
+  const recipient = /^\d+$/.test(to) ? `+${to}` : to;
+  const payload =
+    WASENDER_PROVIDER === "wasender-dev"
+      ? { to: recipient, body: text }
+      : { to: recipient, text };
+  const response = await fetch(WASENDER_API_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${WASENDER_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!response.ok) {
+    const detail = (await response.text()).slice(0, 1_000);
+    throw new Error(`WAsender send failed (${response.status}): ${detail}`);
+  }
+}
+
+async function processWasenderMessage(inbound) {
+  const sessionSender = inbound.sender.replace(/[^a-zA-Z0-9_-]/g, "-");
+  const result = await runCmd(
+    OPENCLAW_NODE,
+    clawArgs([
+      "agent",
+      "--agent",
+      WASENDER_AGENT_ID,
+      "--session-key",
+      `agent:${WASENDER_AGENT_ID}:wasender-${sessionSender}`,
+      "--message",
+      inbound.text,
+      "--json",
+      "--timeout",
+      "300",
+    ]),
+    { timeoutMs: 330_000 },
+  );
+  if (result.code !== 0) {
+    throw new Error(`OpenClaw agent failed (${result.code}): ${result.output.slice(-2_000)}`);
+  }
+  const answer = extractAgentText(result.output);
+  if (!answer) throw new Error("OpenClaw agent returned no text reply");
+  for (const message of chunkText(answer)) {
+    await sendWasenderText(inbound.sender, message);
+  }
+}
+
+// WAsender expects a quick 200 response. Agent work continues in a per-sender
+// queue, preserving conversation order and a separate OpenClaw session per user.
+app.post("/hooks/wasender", (req, res) => {
+  if (!WASENDER_API_KEY || !WASENDER_WEBHOOK_SECRET || WASENDER_ALLOWED_SENDERS.size === 0) {
+    return res.status(503).json({ ok: false, error: "WAsender bridge is not configured" });
+  }
+
+  const signature = req.get("X-Webhook-Signature") || "";
+  if (!safeEqual(signature, WASENDER_WEBHOOK_SECRET)) {
+    return res.status(401).json({ ok: false, error: "Invalid webhook signature" });
+  }
+
+  const inbound = parseWasenderInbound(req.body);
+  if (!inbound) return res.json({ ok: true, ignored: true });
+  if (inbound.isGroup && !WASENDER_ALLOW_GROUPS) {
+    return res.json({ ok: true, ignored: true, reason: "groups disabled" });
+  }
+  if (!wasenderSenderAllowed(inbound.sender)) {
+    return res.json({ ok: true, ignored: true, reason: "sender not allowed" });
+  }
+  if (!rememberWasenderMessage(inbound.id)) {
+    return res.json({ ok: true, ignored: true, reason: "duplicate" });
+  }
+
+  res.json({ ok: true, accepted: true });
+
+  const previous = wasenderSenderQueues.get(inbound.sender) || Promise.resolve();
+  const current = previous
+    .then(() => processWasenderMessage(inbound))
+    .catch((err) => console.error(`[wasender] ${inbound.sender}: ${String(err)}`))
+    .finally(() => {
+      if (wasenderSenderQueues.get(inbound.sender) === current) {
+        wasenderSenderQueues.delete(inbound.sender);
+      }
+    });
+  wasenderSenderQueues.set(inbound.sender, current);
 });
 
 app.get("/setup/app.js", requireSetupAuth, (_req, res) => {
