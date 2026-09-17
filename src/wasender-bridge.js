@@ -22,7 +22,15 @@ export function normalizeWasenderSender(value) {
 export function parseWasenderInbound(payload) {
   if (!payload || typeof payload !== "object") return null;
   const event = String(payload.event || "").toLowerCase();
-  if (!["messages.received", "message.received", "personal.message.received"].includes(event)) {
+  if (
+    ![
+      "messages.received",
+      "messages-personal.received",
+      "messages-group.received",
+      "message.received",
+      "personal.message.received",
+    ].includes(event)
+  ) {
     return null;
   }
 
@@ -60,8 +68,23 @@ export function parseWasenderInbound(payload) {
   const sender = normalizeWasenderSender(rawSender);
   if (!sender) return null;
 
+  const participant = normalizeWasenderSender(
+    key.cleanedParticipantPn ||
+      message.cleanedParticipantPn ||
+      data.cleanedParticipantPn ||
+      key.participantPn ||
+      message.participantPn ||
+      data.participantPn ||
+      key.participant ||
+      message.participant ||
+      data.participant ||
+      "",
+  );
+
   const id = String(key.id || message.id || data.id || payload.id || "").trim();
-  return { id, sender, text, isGroup: sender.endsWith("@g.us") };
+  const inbound = { id, sender, text, isGroup: sender.endsWith("@g.us") };
+  if (participant) inbound.participant = participant;
+  return inbound;
 }
 
 export function extractAgentText(output) {

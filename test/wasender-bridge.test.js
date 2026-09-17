@@ -42,6 +42,30 @@ test("ignores outbound and non-message events", () => {
   );
 });
 
+test("parses a WAsenderAPI group message and keeps participant identity", () => {
+  const message = parseWasenderInbound({
+    event: "messages-group.received",
+    data: {
+      messages: {
+        key: {
+          id: "group-456",
+          fromMe: false,
+          remoteJid: "120363012345678@g.us",
+          cleanedParticipantPn: "994501234567",
+        },
+        messageBody: "Bu funksiya niyə belə işləyir?",
+      },
+    },
+  });
+  assert.deepEqual(message, {
+    id: "group-456",
+    sender: "120363012345678@g.us",
+    text: "Bu funksiya niyə belə işləyir?",
+    isGroup: true,
+    participant: "994501234567",
+  });
+});
+
 test("extracts agent reply text from CLI JSON", () => {
   const output = JSON.stringify({
     result: { payloads: [{ text: "Birinci" }, { text: "İkinci" }] },

@@ -422,6 +422,10 @@ async function sendWasenderText(to, text) {
 
 async function processWasenderMessage(inbound) {
   const sessionSender = inbound.sender.replace(/[^a-zA-Z0-9_-]/g, "-");
+  const agentMessage =
+    inbound.isGroup && inbound.participant
+      ? `[WhatsApp group message from +${inbound.participant}]\n${inbound.text}`
+      : inbound.text;
   const result = await runCmd(
     OPENCLAW_NODE,
     clawArgs([
@@ -431,7 +435,7 @@ async function processWasenderMessage(inbound) {
       "--session-key",
       `agent:${WASENDER_AGENT_ID}:wasender-${sessionSender}`,
       "--message",
-      inbound.text,
+      agentMessage,
       "--json",
       "--timeout",
       "300",

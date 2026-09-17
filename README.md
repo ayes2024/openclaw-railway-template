@@ -40,7 +40,7 @@ Optional:
 - `WASENDER_ALLOWED_SENDERS` — comma-separated WhatsApp numbers allowed to use the agent, without `+`; use `*` only if public access is intentional
 - `WASENDER_AGENT_ID=cavad-aem-ba` — OpenClaw agent that answers incoming messages
 - `WASENDER_PROVIDER=wasenderapi` — use `wasender-dev` only for the separate wasender.dev service
-- `WASENDER_ALLOW_GROUPS=true` — optional; groups are ignored by default
+- `WASENDER_ALLOW_GROUPS=true` — optional; subscribe to `messages-group.received` in WAsender when enabled
 
 WAsender webhook URL: `https://<your-app>.up.railway.app/hooks/wasender`. Subscribe to the incoming-message event and use the same secret as `WASENDER_WEBHOOK_SECRET`.
 
