@@ -73,6 +73,31 @@ const WASENDER_API_URL =
     ? "https://api.wasender.dev/messages/text"
     : "https://www.wasenderapi.com/api/send-message");
 
+const AYES_TASK_URL = (process.env.AYES_TASK_URL?.trim() || "https://task.ayesbook.com").replace(/\/$/, "");
+const AYES_TASK_EMAIL = process.env.AYES_TASK_EMAIL?.trim();
+const AYES_TASK_PASSWORD = process.env.AYES_TASK_PASSWORD;
+const AYES_TASK_PROJECT_ID = process.env.AYES_TASK_PROJECT_ID?.trim();
+const AYES_TASK_TYPE_ID = process.env.AYES_TASK_TYPE_ID?.trim();
+const AYES_TASK_EXECUTOR_IDS = splitIds(process.env.AYES_TASK_EXECUTOR_IDS);
+const AYES_TASK_REVIEWER_IDS = splitIds(process.env.AYES_TASK_REVIEWER_IDS);
+const AYES_TASK_APPROVER_IDS = splitIds(process.env.AYES_TASK_APPROVER_IDS);
+
+function splitIds(value) {
+  return String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function ayesTaskConfigured() {
+  return Boolean(
+    AYES_TASK_EMAIL &&
+      AYES_TASK_PASSWORD &&
+      AYES_TASK_PROJECT_ID &&
+      AYES_TASK_TYPE_ID &&
+      AYES_TASK_EXECUTOR_IDS.length &&
+      AYES_TASK_REVIEWER_IDS.length &&
+      AYES_TASK_APPROVER_IDS.length,
+  );
+}
+
 // Gateway admin token (protects OpenClaw gateway + Control UI).
 // Must be stable across restarts. If not provided via env, persist it in the state dir.
 function resolveGatewayToken() {
@@ -475,6 +500,71 @@ async function sendWasenderLongText(to, text) {
   for (const message of chunkText(text)) await sendWasenderText(to, message);
 }
 
+function parseAgentJson(text) {
+  const value = String(text || "").trim();
+  try {
+    return JSON.parse(value);
+  } catch {
+    const start = value.indexOf("{");
+    const end = value.lastIndexOf("}");
+    if (start < 0 || end <= start) return null;
+    try {
+      return JSON.parse(value.slice(start, end + 1));
+    } catch {
+      return null;
+    }
+  }
+}
+
+async function ayesTaskRequest(pathname, options = {}) {
+  const response = await fetch(`${AYES_TASK_URL}/api/v1${pathname}`, {
+    ...options,
+    headers: {
+      Accept: "application/json",
+      ...(options.body ? { "Content-Type": "application/json" } : {}),
+      ...(options.token ? { Authorization: `Bearer ${options.token}` } : {}),
+    },
+    signal: AbortSignal.timeout(30_000),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(`AYES Task request failed (${response.status}): ${body.message || "unknown error"}`);
+  return body;
+}
+
+async function createAyesTask(draft) {
+  const login = await ayesTaskRequest("/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ email: AYES_TASK_EMAIL, password: AYES_TASK_PASSWORD }),
+  });
+  if (!login.accessToken) throw new Error("AYES Task login returned no access token");
+
+  const deadline = new Date(Date.now() + 24 * 60 * 60 * 1_000);
+  deadline.setMinutes(0, 0, 0);
+  return ayesTaskRequest("/tasks", {
+    method: "POST",
+    token: login.accessToken,
+    body: JSON.stringify({
+      title: String(draft.title || "WhatsApp-dan daxil olan məsələ").slice(0, 250),
+      description: String(draft.description || ""),
+      link: "",
+      projectId: AYES_TASK_PROJECT_ID,
+      taskTypeId: AYES_TASK_TYPE_ID,
+      category: ["NEW_FEATURE", "DEVELOPMENT", "BUG"].includes(draft.category)
+        ? draft.category
+        : "BUG",
+      priority: ["LOW", "MEDIUM", "HIGH", "CRITICAL"].includes(draft.priority)
+        ? draft.priority
+        : "MEDIUM",
+      deadline: deadline.toISOString(),
+      estimatedMinutes: Number.isFinite(draft.estimatedMinutes) ? draft.estimatedMinutes : 0,
+      executorIds: AYES_TASK_EXECUTOR_IDS,
+      reviewerIds: AYES_TASK_REVIEWER_IDS,
+      approverIds: AYES_TASK_APPROVER_IDS,
+      attachments: [],
+    }),
+  });
+}
+
 function latestPendingApproval(code = "") {
   if (code) return wasenderPending[code] || null;
   return (
@@ -519,23 +609,46 @@ async function processOwnerInstruction(inbound) {
   }
 
   if (command.action === "task") {
-    const taskDraft = await runWasenderAgent(
+    const taskDraftText = await runWasenderAgent(
       entry.sender,
       [
         "Sahib bu WhatsApp məsələsi üçün task açılmasını istəyir.",
-        "Task sistemi hələ qoşulmayıb. Azərbaycan dilində hazır task mətni tərtib et:",
-        "Başlıq, təsvir, faktiki nəticə, gözlənilən nəticə, təsirlənən hissə, qəbul meyarları.",
+        "Yalnız etibarlı JSON qaytar. Markdown və əlavə mətn yazma.",
+        'Format: {"title":"...","description":"...","category":"BUG|DEVELOPMENT|NEW_FEATURE","priority":"LOW|MEDIUM|HIGH|CRITICAL","estimatedMinutes":0}',
+        "description daxilində faktiki nəticə, gözlənilən nəticə, təsirlənən hissə və qəbul meyarlarını yaz.",
         `Orijinal mesaj: ${entry.text}`,
         `Əvvəlki analiz: ${entry.analysis}`,
       ].join("\n\n"),
     );
+
+    const taskDraft = parseAgentJson(taskDraftText) || {
+      title: `WhatsApp məsələsi: ${entry.text.slice(0, 180)}`,
+      description: `${entry.analysis}\n\nOrijinal mesaj:\n${entry.text}`,
+      category: "BUG",
+      priority: "MEDIUM",
+      estimatedMinutes: 0,
+    };
+
+    if (ayesTaskConfigured()) {
+      const createdTask = await createAyesTask(taskDraft);
+      entry.status = "task-created";
+      entry.decidedAt = new Date().toISOString();
+      entry.task = { id: createdTask.id, number: createdTask.number, title: createdTask.title };
+      saveWasenderPending();
+      await sendWasenderText(
+        WASENDER_ADMIN_NUMBER,
+        `${entry.code} üçün ${createdTask.number || "task"} yaradıldı: ${createdTask.title || taskDraft.title}\n${AYES_TASK_URL}`,
+      );
+      return;
+    }
+
     entry.status = "task-drafted";
     entry.decidedAt = new Date().toISOString();
     entry.taskDraft = taskDraft;
     saveWasenderPending();
     await sendWasenderLongText(
       WASENDER_ADMIN_NUMBER,
-      `${entry.code} üçün task mətni hazırdır. Task sistemi qoşulan kimi avtomatik açılacaq:\n\n${taskDraft}`,
+      `${entry.code} üçün task mətni hazırdır. İcraçı/yoxlayan/təsdiqləyən seçiləndən sonra avtomatik açılacaq:\n\n${taskDraft.title}\n\n${taskDraft.description}`,
     );
     return;
   }

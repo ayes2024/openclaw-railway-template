@@ -42,6 +42,9 @@ Optional:
 - `WASENDER_ADMIN_NUMBER` — owner number without `+`; when set, Cavad asks this number for approval before replying
 - `WASENDER_PROVIDER=wasenderapi` — use `wasender-dev` only for the separate wasender.dev service
 - `WASENDER_ALLOW_GROUPS=true` — optional; subscribe to `messages-group.received` in WAsender when enabled
+- `AYES_TASK_URL`, `AYES_TASK_EMAIL`, `AYES_TASK_PASSWORD` — Cavad's AYES Task account
+- `AYES_TASK_PROJECT_ID`, `AYES_TASK_TYPE_ID` — target project and task type
+- `AYES_TASK_EXECUTOR_IDS`, `AYES_TASK_REVIEWER_IDS`, `AYES_TASK_APPROVER_IDS` — comma-separated default assignees
 
 WAsender webhook URL: `https://<your-app>.up.railway.app/hooks/wasender`. Subscribe to the incoming-message event and use the same secret as `WASENDER_WEBHOOK_SECRET`.
 
