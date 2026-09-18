@@ -60,6 +60,11 @@ const STATE_DIR =
 const WORKSPACE_DIR =
   process.env.OPENCLAW_WORKSPACE_DIR?.trim() ||
   path.join(STATE_DIR, "workspace");
+const AYES_PROJECT_MEMORY_PATH = path.join(
+  WORKSPACE_DIR,
+  "cavad-aem-ba",
+  "AEM_PROJECT_MEMORY.md",
+);
 
 // Protect /setup with a user-provided password.
 const SETUP_PASSWORD = process.env.SETUP_PASSWORD?.trim();
@@ -201,6 +206,39 @@ function ayesTaskConfigured() {
       AYES_TASK_AGENT_USER_IDS["aem-devops"] &&
       AYES_TASK_APPROVER_IDS.length,
   );
+}
+
+function ensureAyesProjectMemory() {
+  if (fs.existsSync(AYES_PROJECT_MEMORY_PATH)) return;
+  fs.mkdirSync(path.dirname(AYES_PROJECT_MEMORY_PATH), { recursive: true });
+  fs.writeFileSync(
+    AYES_PROJECT_MEMORY_PATH,
+    [
+      "# AEM Project Memory",
+      "",
+      "Bu fayl tasklardan öyrənilən daimi, qısa və məxfi olmayan AEM texniki biliklərini saxlayır.",
+      "Hər qeyd konkret repo, modul və qərarı göstərməlidir. Müvəqqəti iş gedişatını burada saxlama.",
+      "",
+    ].join("\n"),
+    { mode: 0o600 },
+  );
+}
+
+function projectMemoryInstruction({ update = false } = {}) {
+  const instructions = [
+    `İşə başlamazdan əvvəl ümumi AEM layihə yaddaşını oxu: ${AYES_PROJECT_MEMORY_PATH}`,
+    "Bu task ayrıca sessiyadadır; layihənin daimi qaydalarını həmin fayldan və repo AGENTS.md sənədlərindən götür.",
+  ];
+  if (update) {
+    instructions.push(
+      "Task bitəndə gələcək tasklara lazım olacaq yeni, təsdiqlənmiş texniki fakt varsa AEM_PROJECT_MEMORY.md faylına ən çox 5 qısa sətir əlavə et. Taskın müvəqqəti gedişatını, tokenləri və məxfi məlumatı yazma.",
+    );
+  }
+  return instructions.join("\n");
+}
+
+function projectCaseSession(entry) {
+  return `case-${entry?.code || entry?.task?.id || crypto.randomUUID()}`;
 }
 
 // Gateway admin token (protects OpenClaw gateway + Control UI).
@@ -1003,46 +1041,20 @@ async function processOwnerInstruction(inbound) {
   }
 
   if (command.action === "task") {
-    const taskDraftText = await runWasenderAgent(
-      entry.sender,
-      [
-        "Sahib bu WhatsApp məsələsi üçün task açılmasını istəyir.",
-        "Yalnız etibarlı JSON qaytar. Markdown və əlavə mətn yazma.",
-        'Format: {"title":"...","description":"...","agentId":"aem-backend|aem-frontend|aem-mobile"}',
-        "title maksimum 8 söz olsun. Problemi icra edəcək əsas developer agentini agentId ilə seç.",
-        "description daxilində faktiki nəticə, gözlənilən nəticə, təsirlənən hissə və qəbul meyarlarını yaz.",
-        `Orijinal mesaj: ${entry.text}`,
-        `Əvvəlki analiz: ${entry.analysis}`,
-      ].join("\n\n"),
-    );
-
-    const taskDraft = parseAgentJson(taskDraftText) || {
-      title: `WhatsApp məsələsi: ${entry.text.slice(0, 180)}`,
-      description: `${entry.analysis}\n\nOrijinal mesaj:\n${entry.text}`,
-      agentId: "aem-backend",
-    };
-
     if (ayesTaskConfigured()) {
-      const createdTask = await createAyesTask(taskDraft);
+      const createdTask = await createProjectTask(entry);
       entry.status = "task-created";
       entry.decidedAt = new Date().toISOString();
       entry.task = { id: createdTask.id, number: createdTask.number, title: createdTask.title };
       saveWasenderPending();
       await sendWasenderText(
         WASENDER_ADMIN_NUMBER,
-        `${entry.code} üçün ${createdTask.number || "task"} yaradıldı: ${createdTask.title || taskDraft.title}\n${AYES_TASK_URL}`,
+        `${entry.code} üçün ${createdTask.number || "task"} yaradıldı: ${createdTask.title}\n${AYES_TASK_URL}`,
       );
       return;
     }
 
-    entry.status = "task-drafted";
-    entry.decidedAt = new Date().toISOString();
-    entry.taskDraft = taskDraft;
-    saveWasenderPending();
-    await sendWasenderLongText(
-      WASENDER_ADMIN_NUMBER,
-      `${entry.code} üçün task mətni hazırdır. İcraçı/yoxlayan/təsdiqləyən seçiləndən sonra avtomatik açılacaq:\n\n${taskDraft.title}\n\n${taskDraft.description}`,
-    );
+    await sendWasenderText(WASENDER_ADMIN_NUMBER, "AYES Task inteqrasiyası hazır deyil.");
     return;
   }
 
@@ -1053,8 +1065,9 @@ async function processOwnerInstruction(inbound) {
     const ownerInstruction =
       command.action === "instruction" ? command.text : "Təklif etdiyin uyğun cavabı göndər.";
     finalReply = await runWasenderAgent(
-      entry.sender,
+      projectCaseSession(entry),
       [
+        projectMemoryInstruction(),
         "Aşağıdakı WhatsApp mesajına cavab vermək sahib tərəfindən təsdiqləndi.",
         "Yalnız qarşı tərəfə göndəriləcək yekun cavab mətnini yaz. Əlavə izah və başlıq yazma.",
         `Orijinal mesaj: ${entry.text}`,
@@ -1089,8 +1102,9 @@ async function planProjectApproval(entry, instruction) {
   }
 
   const planText = await runWasenderAgent(
-    entry.sender,
+    projectCaseSession(entry),
     [
+      projectMemoryInstruction(),
       "Sahibin aşağıdakı təlimatını təhlükəsiz şəkildə icra planına çevir.",
       "Yalnız etibarlı JSON qaytar, markdown və əlavə mətn yazma.",
       'action yalnız bunlardan biri olsun: "discuss", "reply", "task", "task-and-reply", "skip".',
@@ -1126,8 +1140,9 @@ async function createProjectTask(entry) {
 
 async function makeCustomerReply(entry, instruction) {
   return runWasenderAgent(
-    entry.sender,
+    projectCaseSession(entry),
     [
+      projectMemoryInstruction(),
       "Aşağıdakı müştəri WhatsApp mesajına yekun cavab hazırla.",
       "Yalnız müştəriyə göndəriləcək cavabı yaz; başlıq, texniki analiz və daxili məlumat əlavə etmə.",
       "Cavab nəzakətli, müştəri yönümlü, aydın və qısa olsun.",
@@ -1174,13 +1189,14 @@ async function processProjectApprovalMessage(inbound, flow) {
       );
     }
     const prompt = [
+      projectMemoryInstruction({ update: workRequested }),
       `Bu mesaj ${flow.name} layihəsinin sahibindən daxili BA qrupunda gəlir.`,
       "Cavad biznes analitiki kimi normal söhbət et. Müştəri qrupuna heç nə göndərmə.",
       `Sahibin mesajı: ${inbound.text}`,
     ].join("\n\n");
     const answer = workRequested
       ? await runWasenderAgentWithProgress(
-          `approval-${flow.approvalGroupJid}`,
+          `work-${inbound.id || crypto.randomUUID()}`,
           prompt,
           flow.agentId,
           flow.approvalGroupJid,
@@ -1194,8 +1210,9 @@ async function processProjectApprovalMessage(inbound, flow) {
   const plan = await planProjectApproval(entry, inbound.text);
   if (plan.action === "discuss") {
     const answer = await runWasenderAgent(
-      entry.sender,
+      projectCaseSession(entry),
       [
+        projectMemoryInstruction(),
         "Sahib müştəriyə cavab göndərmədən məsələ barədə daxili izah istəyir.",
         "Azərbaycan dilində texniki, aydın və praktik cavab ver.",
         `Müştəri mesajı: ${entry.text}`,
@@ -1243,9 +1260,11 @@ async function processProjectApprovalMessage(inbound, flow) {
 }
 
 async function processProjectIntakeMessage(inbound, flow) {
+  const code = makeApprovalCode(inbound.id || `${inbound.sender}-${Date.now()}`);
   const analysis = await runWasenderAgent(
-    inbound.sender,
+    `case-${code}`,
     [
+      projectMemoryInstruction(),
       `Yeni mesaj ${flow.name} müştəri qrupundan gəlib.`,
       "AEM biznes analitiki kimi problemi anla və lazım olsa layihə repolarını araşdır.",
       "Hələ müştəriyə cavab vermə. Layihə sahibinə Azərbaycan dilində texniki və aydın hesabat hazırla.",
@@ -1255,7 +1274,6 @@ async function processProjectIntakeMessage(inbound, flow) {
     ].join("\n\n"),
     flow.agentId,
   );
-  const code = makeApprovalCode(inbound.id || `${inbound.sender}-${Date.now()}`);
   const entry = {
     code,
     sender: inbound.sender,
@@ -1340,6 +1358,7 @@ async function processTeamGroupMessage(inbound, flow) {
   }
 
   const teamPrompt = [
+      projectMemoryInstruction({ update: approved && Boolean(referencedTask) }),
       `Bu mesaj ${flow.name} adlı daxili WhatsApp idarəetmə qrupundan gəlir.`,
       "Sən Cavad AEM BA və komandanın yeganə əlaqələndiricisisən. İstifadəçi yalnız səninlə danışır.",
       "AEM Backend, AEM Frontend, AEM Mobile, AEM QA və AEM DevOps agentlərini öz daxilində koordinasiya et.",
@@ -1359,7 +1378,9 @@ async function processTeamGroupMessage(inbound, flow) {
     ].join("\n\n");
   const answer = approved
     ? await runWasenderAgentWithProgress(
-        `team-${inbound.sender}`,
+        referencedTask
+          ? `task-${referencedTask.id || referencedTask.number}`
+          : `work-${inbound.id || crypto.randomUUID()}`,
         teamPrompt,
         flow.coordinatorAgentId,
         inbound.sender,
@@ -1367,7 +1388,13 @@ async function processTeamGroupMessage(inbound, flow) {
           ? `${referencedTask.number || referencedTask.id} üzrə icra davam edir`
           : "Komanda işi davam edir",
       )
-    : await runWasenderAgent(`team-${inbound.sender}`, teamPrompt, flow.coordinatorAgentId);
+    : await runWasenderAgent(
+        referencedTask
+          ? `task-${referencedTask.id || referencedTask.number}`
+          : `team-${inbound.sender}`,
+        teamPrompt,
+        flow.coordinatorAgentId,
+      );
   await sendWasenderLongText(inbound.sender, answer);
 }
 
@@ -2502,6 +2529,11 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
   try {
     fs.chmodSync(STATE_DIR, 0o700);
   } catch {}
+  try {
+    ensureAyesProjectMemory();
+  } catch (error) {
+    console.warn(`[ayes-task] project memory initialization failed: ${String(error)}`);
+  }
 
   console.log(`[wrapper] gateway token: ${OPENCLAW_GATEWAY_TOKEN ? "(set)" : "(missing)"}`);
   console.log(`[wrapper] gateway target: ${GATEWAY_TARGET}`);
