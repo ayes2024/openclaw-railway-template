@@ -1151,6 +1151,7 @@ async function processTeamGroupMessage(inbound, flow) {
       "Yeni tapşırıqda əvvəl problemi anla, uyğun agentləri və icra planını qısa yaz, sonra 'İcraya başlayım?' deyə təsdiq istə.",
       "İstifadəçi açıq şəkildə OK, başla, icra et və ya davam et deməyibsə kodu dəyişmə və xarici əməliyyat etmə.",
       "Açıq təsdiq verilibsə uyğun developer agentinə işi gördür, sonra AEM QA agentinə yoxlatdır.",
+      "Bu WhatsApp sorğusunda sessions_yield etmə. İşə saldığın agentlərin nəticəsini agents_wait ilə gözlə və yekun cavabı bu turn daxilində qaytar.",
       "İstifadəçidən worker agentlərlə ayrıca danışmağı istəmə. Onların nəticəsini sən çatdır.",
       "Cavabları Azərbaycan dilində qısa və aydın yaz. Öz mətnini '🛠️ Cavad:' ilə başlat.",
       "Agent nəticəsi varsa ayrıca sətirdə uyğun prefiks istifadə et: '⚙️ AEM Backend:', '🖥️ AEM Frontend:', '📱 AEM Mobile:' və ya '🧪 AEM QA:'.",
