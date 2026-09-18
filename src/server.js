@@ -62,6 +62,7 @@ const WASENDER_PROVIDER = process.env.WASENDER_PROVIDER?.trim().toLowerCase() ||
 const WASENDER_ALLOW_GROUPS = process.env.WASENDER_ALLOW_GROUPS === "true";
 const WASENDER_GROUP_AGENT_ROUTES = parseGroupAgentRoutes(process.env.WASENDER_GROUP_AGENT_ROUTES);
 const WASENDER_PROJECT_FLOWS = parseProjectFlows(process.env.WASENDER_PROJECT_FLOWS);
+const WASENDER_TEAM_FLOWS = parseTeamFlows(process.env.WASENDER_TEAM_FLOWS);
 const WASENDER_ADMIN_NUMBER = normalizeWasenderSender(process.env.WASENDER_ADMIN_NUMBER || "");
 const WASENDER_ALLOWED_SENDERS = new Set(
   (process.env.WASENDER_ALLOWED_SENDERS || "")
@@ -130,6 +131,29 @@ function parseProjectFlows(value) {
       );
   } catch {
     console.warn("[wasender] WASENDER_PROJECT_FLOWS must be a JSON array");
+    return [];
+  }
+}
+
+function parseTeamFlows(value) {
+  if (!value?.trim()) return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) throw new Error("expected an array");
+    return parsed
+      .map((flow) => ({
+        name: String(flow?.name || "AEM Agent AI Team").trim(),
+        coordinatorAgentId: String(flow?.coordinatorAgentId || WASENDER_AGENT_ID).trim(),
+        groupJid: normalizeWasenderSender(flow?.groupJid || ""),
+        groupName: String(flow?.groupName || "").trim(),
+      }))
+      .filter(
+        (flow) =>
+          flow.coordinatorAgentId &&
+          (flow.groupJid.endsWith("@g.us") || flow.groupName),
+      );
+  } catch {
+    console.warn("[wasender] WASENDER_TEAM_FLOWS must be a JSON array");
     return [];
   }
 }
@@ -552,6 +576,19 @@ async function resolveProjectIntakeFlow(groupJid) {
     namedFlows.find(
       (flow) => normalizeGroupName(flow.intakeGroupName) === normalizeGroupName(groupName),
     ) || null
+  );
+}
+
+async function resolveTeamFlow(groupJid) {
+  const direct = WASENDER_TEAM_FLOWS.find((flow) => flow.groupJid === groupJid);
+  if (direct) return direct;
+
+  const namedFlows = WASENDER_TEAM_FLOWS.filter((flow) => flow.groupName);
+  if (!namedFlows.length) return null;
+  const groupName = await getWasenderGroupName(groupJid);
+  return (
+    namedFlows.find((flow) => normalizeGroupName(flow.groupName) === normalizeGroupName(groupName)) ||
+    null
   );
 }
 
@@ -1090,6 +1127,41 @@ async function processDirectGroupMessage(inbound, agentId) {
   await sendWasenderLongText(inbound.sender, answer);
 }
 
+function isExplicitTeamApproval(text) {
+  return /^(?:ok|okay|başla|basla|icra et|et|davam et|davam|təsdiq|tesdiq)(?:\s|[.!?,]|$)/i.test(
+    String(text || "").trim(),
+  );
+}
+
+async function processTeamGroupMessage(inbound, flow) {
+  const approved = isExplicitTeamApproval(inbound.text);
+  if (approved) {
+    await sendWasenderText(
+      inbound.sender,
+      "🛠️ Cavad: Təsdiqi aldım. Uyğun agentlərlə icraya başlayıram və nəticəni burada yazacağam.",
+    );
+  }
+
+  const answer = await runWasenderAgent(
+    `team-${inbound.sender}`,
+    [
+      `Bu mesaj ${flow.name} adlı daxili WhatsApp idarəetmə qrupundan gəlir.`,
+      "Sən Cavad AEM BA və komandanın yeganə əlaqələndiricisisən. İstifadəçi yalnız səninlə danışır.",
+      "AEM Backend, AEM Frontend, AEM Mobile və AEM QA agentlərini öz daxilində koordinasiya et.",
+      "Yeni tapşırıqda əvvəl problemi anla, uyğun agentləri və icra planını qısa yaz, sonra 'İcraya başlayım?' deyə təsdiq istə.",
+      "İstifadəçi açıq şəkildə OK, başla, icra et və ya davam et deməyibsə kodu dəyişmə və xarici əməliyyat etmə.",
+      "Açıq təsdiq verilibsə uyğun developer agentinə işi gördür, sonra AEM QA agentinə yoxlatdır.",
+      "İstifadəçidən worker agentlərlə ayrıca danışmağı istəmə. Onların nəticəsini sən çatdır.",
+      "Cavabları Azərbaycan dilində qısa və aydın yaz. Öz mətnini '🛠️ Cavad:' ilə başlat.",
+      "Agent nəticəsi varsa ayrıca sətirdə uyğun prefiks istifadə et: '⚙️ AEM Backend:', '🖥️ AEM Frontend:', '📱 AEM Mobile:' və ya '🧪 AEM QA:'.",
+      `Bu mesaj açıq icra təsdiqidir: ${approved ? "Bəli" : "Xeyr"}`,
+      `İstifadəçinin mesajı: ${inbound.text}`,
+    ].join("\n\n"),
+    flow.coordinatorAgentId,
+  );
+  await sendWasenderLongText(inbound.sender, answer);
+}
+
 // WAsender expects a quick 200 response. Agent work continues in a per-sender
 // queue, preserving conversation order and a separate OpenClaw session per user.
 app.post("/hooks/wasender", (req, res) => {
@@ -1135,12 +1207,19 @@ app.post("/hooks/wasender", (req, res) => {
   const queueKey = isOwnerInstruction ? `owner-${WASENDER_ADMIN_NUMBER}` : inbound.sender;
   const previous = wasenderSenderQueues.get(queueKey) || Promise.resolve();
   let activeProjectFlow = approvalFlow;
+  let activeTeamFlow = null;
   const current = previous
     .then(async () => {
       if (inbound.audio) inbound.text = await transcribeWasenderVoice(inbound);
       if (isOwnerInstruction) return processOwnerInstruction(inbound);
       if (approvalFlow) return processProjectApprovalMessage(inbound, approvalFlow);
       if (inbound.isGroup) {
+        const teamFlow = await resolveTeamFlow(inbound.sender);
+        if (teamFlow) {
+          activeTeamFlow = teamFlow;
+          if (WASENDER_ADMIN_NUMBER && inbound.participant !== WASENDER_ADMIN_NUMBER) return;
+          return processTeamGroupMessage(inbound, teamFlow);
+        }
         const intakeFlow = await resolveProjectIntakeFlow(inbound.sender);
         if (intakeFlow) {
           activeProjectFlow = intakeFlow;
@@ -1152,6 +1231,17 @@ app.post("/hooks/wasender", (req, res) => {
     })
     .catch(async (err) => {
       console.error(`[wasender] ${inbound.sender}: ${String(err)}`);
+      if (activeTeamFlow) {
+        try {
+          await sendWasenderText(
+            inbound.sender,
+            `🛠️ Cavad: Əməliyyatı yerinə yetirmək alınmadı: ${String(err?.message || err).slice(0, 500)}`,
+          );
+        } catch (notifyError) {
+          console.error(`[wasender] team flow error notification failed: ${String(notifyError)}`);
+        }
+        return;
+      }
       if (activeProjectFlow) {
         try {
           await sendWasenderText(
