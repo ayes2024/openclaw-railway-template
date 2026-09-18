@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   chunkText,
+  extractAgentResult,
   extractAgentText,
   makeApprovalCode,
   normalizeWasenderSender,
@@ -98,6 +99,31 @@ test("extracts agent reply text from CLI JSON", () => {
     result: { payloads: [{ text: "Birinci" }, { text: "İkinci" }] },
   });
   assert.equal(extractAgentText(output), "Birinci\n\nİkinci");
+});
+
+test("extracts task token usage from gateway agent JSON", () => {
+  const output = JSON.stringify({
+    result: {
+      payloads: [{ text: "Hazırdır" }],
+      meta: {
+        agentMeta: {
+          usage: { input: 1200, output: 300, cacheRead: 500, cacheWrite: 10, total: 2010 },
+          costUsd: 0.0123,
+        },
+      },
+    },
+  });
+  assert.deepEqual(extractAgentResult(output), {
+    text: "Hazırdır",
+    usage: {
+      inputTokens: 1200,
+      outputTokens: 300,
+      cacheReadTokens: 500,
+      cacheWriteTokens: 10,
+      totalTokens: 2010,
+      tokenCostUsd: 0.0123,
+    },
+  });
 });
 
 test("normalizes senders, compares secrets, and chunks replies", () => {

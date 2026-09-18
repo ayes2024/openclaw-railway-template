@@ -76,6 +76,9 @@ export function taskStatusSnapshot(task) {
     cycleNumber: Number(task?.cycleNumber || 0),
     latestRejectionReason: String(task?.latestRejectionReason || ""),
     executionMinutes: Number(task?.executionMinutes || 0),
+    currentSummary: String(task?.currentSummary || ""),
+    waitingFor: String(task?.waitingFor || ""),
+    totalTokens: Number(task?.totalTokens || 0),
     updatedAt: String(task?.updatedAt || ""),
   };
 }
@@ -86,7 +89,10 @@ export function taskSnapshotChanged(previous, current) {
     previous.status !== current.status ||
     previous.cycleNumber !== current.cycleNumber ||
     previous.latestRejectionReason !== current.latestRejectionReason ||
-    previous.executionMinutes !== current.executionMinutes
+    previous.executionMinutes !== current.executionMinutes ||
+    previous.currentSummary !== current.currentSummary ||
+    previous.waitingFor !== current.waitingFor ||
+    previous.totalTokens !== current.totalTokens
   );
 }
 
@@ -134,6 +140,11 @@ export function formatTaskUpdateMessage(task, taskUrl) {
   }
   if (task?.latestRejectionReason) {
     lines.push(`Reject səbəbi: ${task.latestRejectionReason}`);
+  }
+  if (task?.currentSummary) lines.push(`Son vəziyyət: ${task.currentSummary}`);
+  if (task?.waitingFor) lines.push(`Gözlənilir: ${task.waitingFor}`);
+  if (Number(task?.totalTokens || 0) > 0) {
+    lines.push(`Task üzrə token: ${new Intl.NumberFormat("az-AZ").format(task.totalTokens)}`);
   }
   lines.push(`🔗 ${taskUrl}`);
   return lines.join("\n");

@@ -10,7 +10,7 @@ import * as tar from "tar";
 
 import {
   chunkText,
-  extractAgentText,
+  extractAgentResult,
   makeApprovalCode,
   normalizeWasenderSender,
   parseApprovalInstruction,
@@ -741,7 +741,7 @@ async function transcribeWasenderVoice(inbound) {
   return text;
 }
 
-async function runWasenderAgent(sessionSender, message, agentId = WASENDER_AGENT_ID) {
+async function runWasenderAgentResult(sessionSender, message, agentId = WASENDER_AGENT_ID) {
   const safeSessionSender = sessionSender.replace(/[^a-zA-Z0-9_-]/g, "-");
   const result = await runCmd(
     OPENCLAW_NODE,
@@ -762,9 +762,13 @@ async function runWasenderAgent(sessionSender, message, agentId = WASENDER_AGENT
   if (result.code !== 0) {
     throw new Error(`OpenClaw agent failed (${result.code}): ${result.output.slice(-2_000)}`);
   }
-  const answer = extractAgentText(result.output);
-  if (!answer) throw new Error("OpenClaw agent returned no text reply");
-  return answer;
+  const agentResult = extractAgentResult(result.output);
+  if (!agentResult.text) throw new Error("OpenClaw agent returned no text reply");
+  return agentResult;
+}
+
+async function runWasenderAgent(sessionSender, message, agentId = WASENDER_AGENT_ID) {
+  return (await runWasenderAgentResult(sessionSender, message, agentId)).text;
 }
 
 async function sendWasenderLongText(to, text) {
@@ -772,6 +776,24 @@ async function sendWasenderLongText(to, text) {
 }
 
 async function runWasenderAgentWithProgress(
+  sessionSender,
+  message,
+  agentId,
+  progressTarget,
+  progressLabel = "İş davam edir",
+) {
+  return (
+    await runWasenderAgentWithProgressResult(
+      sessionSender,
+      message,
+      agentId,
+      progressTarget,
+      progressLabel,
+    )
+  ).text;
+}
+
+async function runWasenderAgentWithProgressResult(
   sessionSender,
   message,
   agentId,
@@ -797,7 +819,7 @@ async function runWasenderAgentWithProgress(
   }, 45_000);
   timer.unref?.();
   try {
-    return await runWasenderAgent(sessionSender, message, agentId);
+    return await runWasenderAgentResult(sessionSender, message, agentId);
   } finally {
     clearInterval(timer);
   }
@@ -914,6 +936,20 @@ async function createAyesTask(draft) {
     console.error(`[ayes-task] created notification failed: ${String(error)}`);
   }
   return createdTask;
+}
+
+async function updateAyesTaskProgress(taskID, progress) {
+  if (!ayesTaskConfigured() || !taskID) return null;
+  const login = await ayesTaskRequest("/auth/login", {
+    method: "POST",
+    body: JSON.stringify({ email: AYES_TASK_EMAIL, password: AYES_TASK_PASSWORD }),
+  });
+  if (!login.accessToken) throw new Error("AYES Task login returned no access token");
+  return ayesTaskRequest(`/agent-tasks/${encodeURIComponent(taskID)}/progress`, {
+    method: "POST",
+    token: login.accessToken,
+    body: JSON.stringify(progress),
+  });
 }
 
 async function pollAyesTaskUpdates() {
@@ -1365,6 +1401,17 @@ async function processTeamGroupMessage(inbound, flow) {
       inbound.sender,
       "🛠️ Cavad: Təsdiqi aldım. Uyğun agentlərlə icraya başlayıram və nəticəni burada yazacağam.",
     );
+    if (referencedTask?.id) {
+      try {
+        await updateAyesTaskProgress(referencedTask.id, {
+          sourceId: `wasender-start-${inbound.id || crypto.randomUUID()}`,
+          summary: "Cavad və uyğun agentlər taskın icrasına başlayıb.",
+          waitingFor: "Developer nəticəsini və QA yoxlamasını gözləyirik.",
+        });
+      } catch (error) {
+        console.error(`[ayes-task] start progress update failed: ${String(error)}`);
+      }
+    }
   }
 
   const teamPrompt = [
@@ -1386,8 +1433,8 @@ async function processTeamGroupMessage(inbound, flow) {
       `Bu mesaj açıq icra təsdiqidir: ${approved ? "Bəli" : "Xeyr"}`,
       `İstifadəçinin mesajı: ${inbound.text}`,
     ].join("\n\n");
-  const answer = approved
-    ? await runWasenderAgentWithProgress(
+  const agentResult = approved
+    ? await runWasenderAgentWithProgressResult(
         referencedTask
           ? `task-${referencedTask.id || referencedTask.number}`
           : `work-${inbound.id || crypto.randomUUID()}`,
@@ -1398,13 +1445,41 @@ async function processTeamGroupMessage(inbound, flow) {
           ? `${referencedTask.number || referencedTask.id} üzrə icra davam edir`
           : "Komanda işi davam edir",
       )
-    : await runWasenderAgent(
+    : await runWasenderAgentResult(
         referencedTask
           ? `task-${referencedTask.id || referencedTask.number}`
           : `team-${inbound.sender}`,
         teamPrompt,
         flow.coordinatorAgentId,
       );
+  const answer = agentResult.text;
+  if (referencedTask?.id && (approved || agentResult.usage)) {
+    const usage = agentResult.usage || {};
+    const compactAnswer = String(answer || "").replace(/\s+/g, " ").trim().slice(0, 1_200);
+    try {
+      const latestTask = await findAyesTaskFromMessage(referencedTask.number || referencedTask.id);
+      await updateAyesTaskProgress(referencedTask.id, {
+        sourceId: `wasender-run-${inbound.id || crypto.randomUUID()}`,
+        ...(approved && compactAnswer
+          ? { summary: `Agentlərin son hesabatı: ${compactAnswer}` }
+          : {}),
+        ...(approved
+          ? {
+              waitingFor:
+                latestTask?.waitingFor || "Task sistemində növbəti mərhələ keçidini gözləyirik.",
+            }
+          : {}),
+        inputTokens: Number(usage.inputTokens || 0),
+        outputTokens: Number(usage.outputTokens || 0),
+        cacheReadTokens: Number(usage.cacheReadTokens || 0),
+        cacheWriteTokens: Number(usage.cacheWriteTokens || 0),
+        totalTokens: Number(usage.totalTokens || 0),
+        tokenCostUsd: Number(usage.tokenCostUsd || 0),
+      });
+    } catch (error) {
+      console.error(`[ayes-task] final progress update failed: ${String(error)}`);
+    }
+  }
   await sendWasenderLongText(inbound.sender, answer);
 }
 

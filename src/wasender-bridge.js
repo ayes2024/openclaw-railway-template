@@ -96,28 +96,73 @@ export function parseWasenderInbound(payload) {
   return inbound;
 }
 
-export function extractAgentText(output) {
+function parseAgentOutput(output) {
   if (typeof output !== "string" || !output.trim()) return "";
-  let parsed;
   try {
-    parsed = JSON.parse(output);
+    return JSON.parse(output);
   } catch {
     const start = output.indexOf("{");
     const end = output.lastIndexOf("}");
-    if (start < 0 || end <= start) return "";
+    if (start < 0 || end <= start) return null;
     try {
-      parsed = JSON.parse(output.slice(start, end + 1));
+      return JSON.parse(output.slice(start, end + 1));
     } catch {
-      return "";
+      return null;
     }
   }
+}
 
-  const payloads = parsed?.result?.payloads;
-  if (!Array.isArray(payloads)) return "";
-  return payloads
+function tokenCount(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.round(parsed) : 0;
+}
+
+export function extractAgentResult(output) {
+  const parsed = parseAgentOutput(output);
+  if (!parsed || typeof parsed !== "object") return { text: "", usage: null };
+
+  const payloads = Array.isArray(parsed?.result?.payloads)
+    ? parsed.result.payloads
+    : Array.isArray(parsed?.payloads)
+      ? parsed.payloads
+      : [];
+  const payloadText = payloads
     .map((item) => (typeof item?.text === "string" ? item.text.trim() : ""))
     .filter(Boolean)
     .join("\n\n");
+  const text = payloadText || (typeof parsed.final === "string" ? parsed.final.trim() : "");
+  const rawUsage =
+    parsed?.usage || parsed?.result?.meta?.agentMeta?.usage || parsed?.result?.meta?.usage || null;
+  if (!rawUsage || typeof rawUsage !== "object") return { text, usage: null };
+  const inputTokens = tokenCount(rawUsage.input ?? rawUsage.inputTokens ?? rawUsage.input_tokens);
+  const outputTokens = tokenCount(rawUsage.output ?? rawUsage.outputTokens ?? rawUsage.output_tokens);
+  const cacheReadTokens = tokenCount(
+    rawUsage.cacheRead ?? rawUsage.cacheReadTokens ?? rawUsage.cache_read_tokens,
+  );
+  const cacheWriteTokens = tokenCount(
+    rawUsage.cacheWrite ?? rawUsage.cacheWriteTokens ?? rawUsage.cache_write_tokens,
+  );
+  const totalTokens =
+    tokenCount(rawUsage.total ?? rawUsage.totalTokens ?? rawUsage.total_tokens) ||
+    inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
+  const rawCost = Number(
+    parsed?.costUsd ?? parsed?.result?.meta?.agentMeta?.costUsd ?? rawUsage?.cost?.total ?? 0,
+  );
+  return {
+    text,
+    usage: {
+      inputTokens,
+      outputTokens,
+      cacheReadTokens,
+      cacheWriteTokens,
+      totalTokens,
+      tokenCostUsd: Number.isFinite(rawCost) && rawCost > 0 ? rawCost : 0,
+    },
+  };
+}
+
+export function extractAgentText(output) {
+  return extractAgentResult(output).text;
 }
 
 export function chunkText(text, maxLength = 3800) {

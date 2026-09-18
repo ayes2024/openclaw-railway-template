@@ -48,8 +48,10 @@ test("detects meaningful task lifecycle changes", () => {
   const previous = taskStatusSnapshot({ status: "NEW", updatedAt: "1" });
   const timestampOnly = taskStatusSnapshot({ status: "NEW", updatedAt: "2" });
   const progressed = taskStatusSnapshot({ status: "IN_PROGRESS", updatedAt: "2" });
+  const tokenUpdated = taskStatusSnapshot({ status: "NEW", updatedAt: "2", totalTokens: 1200 });
   assert.equal(taskSnapshotChanged(previous, timestampOnly), false);
   assert.equal(taskSnapshotChanged(previous, progressed), true);
+  assert.equal(taskSnapshotChanged(previous, tokenUpdated), true);
 });
 
 test("finds a task referenced by number or id", () => {
