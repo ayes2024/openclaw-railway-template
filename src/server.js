@@ -145,7 +145,11 @@ function parseGroupAgentRoutes(value) {
 }
 
 function normalizeGroupName(value) {
-  return String(value || "").trim().replace(/\s+/g, " ").toLocaleLowerCase("az-AZ");
+  return String(value || "")
+    .trim()
+    .replace(/[-_–—]+/g, " ")
+    .replace(/\s+/g, " ")
+    .toLocaleLowerCase("az-AZ");
 }
 
 function parseProjectFlows(value) {
@@ -1226,30 +1230,10 @@ async function processProjectApprovalMessage(inbound, flow) {
       return;
     }
 
-    const workRequested = looksLikeExecutionRequest(inbound.text);
-    if (workRequested) {
-      await sendWasenderText(
-        flow.approvalGroupJid,
-        "⏳ Cavad: Tapşırığı qəbul etdim. Analiz və uyğun agentlərin işi başlayır; vəziyyəti burada yeniləyəcəyəm.",
-      );
-    }
-    const prompt = [
-      projectMemoryInstruction({ update: workRequested }),
-      `Bu mesaj ${flow.name} layihəsinin sahibindən daxili BA qrupunda gəlir.`,
-      "Cavad biznes analitiki kimi normal söhbət et. Müştəri qrupuna heç nə göndərmə.",
-      `Sahibin mesajı: ${inbound.text}`,
-    ].join("\n\n");
-    const answer = workRequested
-      ? await runWasenderAgentWithProgress(
-          `work-${inbound.id || crypto.randomUUID()}`,
-          prompt,
-          flow.agentId,
-          flow.approvalGroupJid,
-          "İcra davam edir",
-        )
-      : await runWasenderAgent(`approval-${flow.approvalGroupJid}`, prompt, flow.agentId);
-    await sendWasenderLongText(flow.approvalGroupJid, answer);
-    return;
+    return processTeamGroupMessage(inbound, {
+      name: `${flow.name} · Cavad BA`,
+      coordinatorAgentId: flow.agentId,
+    });
   }
 
   const plan = await planProjectApproval(entry, inbound.text);
@@ -1508,6 +1492,9 @@ app.post("/hooks/wasender", (req, res) => {
   if (inbound.isGroup && !WASENDER_ALLOW_GROUPS) {
     return res.json({ ok: true, ignored: true, reason: "groups disabled" });
   }
+  if (inbound.isGroup && inbound.sender === taskUpdatesGroupJid()) {
+    return res.json({ ok: true, ignored: true, reason: "status-only group" });
+  }
   if (!isOwnerInstruction && !wasenderSenderAllowed(inbound.sender)) {
     return res.json({ ok: true, ignored: true, reason: "sender not allowed" });
   }
@@ -1536,6 +1523,10 @@ app.post("/hooks/wasender", (req, res) => {
         if (intakeFlow) {
           activeProjectFlow = intakeFlow;
           return processProjectIntakeMessage(inbound, intakeFlow);
+        }
+        if (!directGroupAgentId) {
+          console.log(`[wasender] ignored unconfigured group ${inbound.sender}`);
+          return;
         }
       }
       if (directGroupAgentId) return processDirectGroupMessage(inbound, directGroupAgentId);
