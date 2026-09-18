@@ -9,6 +9,7 @@ import {
   formatTaskUpdateMessage,
   taskSnapshotChanged,
   taskStatusSnapshot,
+  taskTitleFromText,
 } from "../src/ayes-task-tracking.js";
 
 test("chooses the requested or inferred AEM developer", () => {
@@ -34,6 +35,13 @@ test("keeps task titles short and formats lifecycle messages", () => {
   };
   assert.match(formatTaskCreatedMessage(task, "https://task.example/agent-tasks"), /AGT-42/);
   assert.match(formatTaskUpdateMessage(task, "https://task.example/agent-tasks"), /AEM Backend — kodu hazırladı/);
+});
+
+test("builds an eight-word title without an extra model call", () => {
+  assert.equal(
+    taskTitleFromText("Task yarat: CRM WhatsApp siyahısında müştəri adı düzgün görünmür və nömrə çıxır"),
+    "CRM WhatsApp siyahısında müştəri adı düzgün görünmür və",
+  );
 });
 
 test("detects meaningful task lifecycle changes", () => {

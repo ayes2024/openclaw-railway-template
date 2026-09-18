@@ -168,7 +168,7 @@ export function parseApprovalInstruction(value) {
 export function parseDirectTaskRequest(value) {
   const input = String(value || "").trim();
   const match = input.match(
-    /^(?:task\s*(?:aç|ac)|yeni\s+task|tapşırıq\s*(?:aç|ac)|tapsiriq\s*(?:aç|ac))\s*[:\-]\s*([\s\S]{3,})$/i,
+    /^(?:task\s*(?:aç|ac|yarat)|yeni\s+task|tapşırıq\s*(?:aç|ac|yarat)|tapsiriq\s*(?:aç|ac|yarat))\s*[:\-]?\s+([\s\S]{3,})$/i,
   );
   return match?.[1]?.trim() || "";
 }

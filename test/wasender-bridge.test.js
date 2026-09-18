@@ -135,5 +135,6 @@ test("parses a direct task request with its description", () => {
     "Mobil tətbiqdə giriş düyməsi işləmir",
   );
   assert.equal(parseDirectTaskRequest("Task aç"), "");
+  assert.equal(parseDirectTaskRequest("Task yarat CRM ad problemi"), "CRM ad problemi");
   assert.equal(parseDirectTaskRequest("Bu problemi araşdır"), "");
 });

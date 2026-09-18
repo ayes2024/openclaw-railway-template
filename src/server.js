@@ -26,6 +26,7 @@ import {
   formatTaskUpdateMessage,
   taskSnapshotChanged,
   taskStatusSnapshot,
+  taskTitleFromText,
 } from "./ayes-task-tracking.js";
 
 // Migrate deprecated CLAWDBOT_* env vars → OPENCLAW_* so existing Railway deployments
@@ -1117,25 +1118,10 @@ async function createProjectTask(entry) {
   if (!ayesTaskConfigured()) {
     throw new Error("AYES Task üçün icraçı, yoxlayan və təsdiqləyən təyin edilməyib");
   }
-  const taskDraftText = await runWasenderAgent(
-    entry.sender,
-    [
-      "Bu müştəri müraciətindən AYES Task üçün texniki task hazırla.",
-      "Yalnız etibarlı JSON qaytar. Markdown və əlavə mətn yazma.",
-      'Format: {"title":"...","description":"...","agentId":"aem-backend|aem-frontend|aem-mobile"}',
-      "title maksimum 8 söz olsun. Problemi icra edəcək əsas developer agentini agentId ilə seç.",
-      "description daxilində faktiki nəticə, gözlənilən nəticə, təsirlənən hissə və qəbul meyarlarını yaz.",
-      `Orijinal müştəri mesajı: ${entry.text}`,
-      `Cavadın texniki analizi: ${entry.analysis}`,
-    ].join("\n\n"),
-    entry.agentId || WASENDER_AGENT_ID,
-  );
-  const taskDraft = parseAgentJson(taskDraftText) || {
-    title: `WhatsApp məsələsi: ${entry.text.slice(0, 180)}`,
-    description: `${entry.analysis}\n\nOrijinal mesaj:\n${entry.text}`,
-    agentId: "aem-backend",
-  };
-  return createAyesTask(taskDraft);
+  return createAyesTask({
+    title: taskTitleFromText(entry.text),
+    description: `${entry.analysis || "Sahibin birbaşa tapşırığı."}\n\nOrijinal mesaj:\n${entry.text}`,
+  });
 }
 
 async function makeCustomerReply(entry, instruction) {
@@ -1161,20 +1147,10 @@ async function processProjectApprovalMessage(inbound, flow) {
   if (!entry) {
     const directTaskText = parseDirectTaskRequest(inbound.text);
     if (directTaskText) {
-      const analysis = await runWasenderAgent(
-        `direct-task-${flow.approvalGroupJid}`,
-        [
-          `Bu daxili iş ${flow.name} layihəsinin sahibi tərəfindən birbaşa verilib.`,
-          "AEM biznes analitiki kimi tələbi texniki task üçün aydınlaşdır.",
-          "Qısa məzmun, təsirlənən sistem hissəsi, gözlənilən nəticə və qəbul meyarlarını yaz.",
-          `İşin təsviri: ${directTaskText}`,
-        ].join("\n\n"),
-        flow.agentId,
-      );
       const directEntry = {
         sender: flow.approvalGroupJid,
         text: directTaskText,
-        analysis,
+        analysis: `AEM layihəsi üzrə sahibin birbaşa tapşırığı: ${directTaskText}`,
         agentId: flow.agentId,
       };
       const createdTask = await createProjectTask(directEntry);

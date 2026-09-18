@@ -48,6 +48,14 @@ export function compactTaskTitle(value, maxLength = 100) {
   return `${title.slice(0, Math.max(1, maxLength - 1)).trimEnd()}…`;
 }
 
+export function taskTitleFromText(value, maxWords = 8) {
+  const cleaned = String(value || "WhatsApp-dan daxil olan məsələ")
+    .replace(/^(?:task\s*(?:aç|ac|yarat)|yeni\s+task|tapşırıq\s*(?:aç|ac|yarat)|tapsiriq\s*(?:aç|ac|yarat))\s*[:\-]?\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return compactTaskTitle(cleaned.split(" ").slice(0, maxWords).join(" "));
+}
+
 export function chooseAgentExecutor(draft, agentUserIds) {
   const requested = String(draft?.agentId || "").trim().toLowerCase();
   if (agentUserIds[requested]) return { agentId: requested, userId: agentUserIds[requested] };
