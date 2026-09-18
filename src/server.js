@@ -723,6 +723,44 @@ async function sendWasenderLongText(to, text) {
   for (const message of chunkText(text)) await sendWasenderText(to, message);
 }
 
+async function runWasenderAgentWithProgress(
+  sessionSender,
+  message,
+  agentId,
+  progressTarget,
+  progressLabel = "İş davam edir",
+) {
+  const startedAt = Date.now();
+  let sendingProgress = false;
+  const timer = setInterval(async () => {
+    if (sendingProgress) return;
+    sendingProgress = true;
+    const minutes = Math.max(1, Math.floor((Date.now() - startedAt) / 60_000));
+    try {
+      await sendWasenderText(
+        progressTarget,
+        `⏳ Cavad: ${progressLabel}. Keçən vaxt: ${minutes} dəqiqə. Agent nəticələrini və QA yoxlamasını gözləyirəm.`,
+      );
+    } catch (error) {
+      console.error(`[wasender] progress notification failed: ${String(error)}`);
+    } finally {
+      sendingProgress = false;
+    }
+  }, 45_000);
+  timer.unref?.();
+  try {
+    return await runWasenderAgent(sessionSender, message, agentId);
+  } finally {
+    clearInterval(timer);
+  }
+}
+
+function looksLikeExecutionRequest(text) {
+  return /(?:task|icra|başla|basla|düzəlt|duzelt|hazırla|hazirla|kodla|yoxla|fix|implement)/i.test(
+    String(text || ""),
+  );
+}
+
 function parseAgentJson(text) {
   const value = String(text || "").trim();
   try {
@@ -1152,15 +1190,27 @@ async function processProjectApprovalMessage(inbound, flow) {
       return;
     }
 
-    const answer = await runWasenderAgent(
-      `approval-${flow.approvalGroupJid}`,
-      [
-        `Bu mesaj ${flow.name} layihəsinin sahibindən daxili BA qrupunda gəlir.`,
-        "Cavad biznes analitiki kimi normal söhbət et. Müştəri qrupuna heç nə göndərmə.",
-        `Sahibin mesajı: ${inbound.text}`,
-      ].join("\n\n"),
-      flow.agentId,
-    );
+    const workRequested = looksLikeExecutionRequest(inbound.text);
+    if (workRequested) {
+      await sendWasenderText(
+        flow.approvalGroupJid,
+        "⏳ Cavad: Tapşırığı qəbul etdim. Analiz və uyğun agentlərin işi başlayır; vəziyyəti burada yeniləyəcəyəm.",
+      );
+    }
+    const prompt = [
+      `Bu mesaj ${flow.name} layihəsinin sahibindən daxili BA qrupunda gəlir.`,
+      "Cavad biznes analitiki kimi normal söhbət et. Müştəri qrupuna heç nə göndərmə.",
+      `Sahibin mesajı: ${inbound.text}`,
+    ].join("\n\n");
+    const answer = workRequested
+      ? await runWasenderAgentWithProgress(
+          `approval-${flow.approvalGroupJid}`,
+          prompt,
+          flow.agentId,
+          flow.approvalGroupJid,
+          "İcra davam edir",
+        )
+      : await runWasenderAgent(`approval-${flow.approvalGroupJid}`, prompt, flow.agentId);
     await sendWasenderLongText(flow.approvalGroupJid, answer);
     return;
   }
@@ -1313,9 +1363,7 @@ async function processTeamGroupMessage(inbound, flow) {
     );
   }
 
-  const answer = await runWasenderAgent(
-    `team-${inbound.sender}`,
-    [
+  const teamPrompt = [
       `Bu mesaj ${flow.name} adlı daxili WhatsApp idarəetmə qrupundan gəlir.`,
       "Sən Cavad AEM BA və komandanın yeganə əlaqələndiricisisən. İstifadəçi yalnız səninlə danışır.",
       "AEM Backend, AEM Frontend, AEM Mobile, AEM QA və AEM DevOps agentlərini öz daxilində koordinasiya et.",
@@ -1332,9 +1380,18 @@ async function processTeamGroupMessage(inbound, flow) {
         : "Mesajda tanınan Task ID yoxdur. Lazım olan iş təsvirini istifadəçinin mesajından götür.",
       `Bu mesaj açıq icra təsdiqidir: ${approved ? "Bəli" : "Xeyr"}`,
       `İstifadəçinin mesajı: ${inbound.text}`,
-    ].join("\n\n"),
-    flow.coordinatorAgentId,
-  );
+    ].join("\n\n");
+  const answer = approved
+    ? await runWasenderAgentWithProgress(
+        `team-${inbound.sender}`,
+        teamPrompt,
+        flow.coordinatorAgentId,
+        inbound.sender,
+        referencedTask
+          ? `${referencedTask.number || referencedTask.id} üzrə icra davam edir`
+          : "Komanda işi davam edir",
+      )
+    : await runWasenderAgent(`team-${inbound.sender}`, teamPrompt, flow.coordinatorAgentId);
   await sendWasenderLongText(inbound.sender, answer);
 }
 
