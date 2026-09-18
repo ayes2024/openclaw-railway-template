@@ -1185,16 +1185,8 @@ app.post("/hooks/wasender", (req, res) => {
     : null;
   const isOwnerInstruction =
     Boolean(WASENDER_ADMIN_NUMBER) && !inbound.isGroup && inbound.sender === WASENDER_ADMIN_NUMBER;
-  const isProjectOwnerInstruction = Boolean(
-    approvalFlow &&
-      WASENDER_ADMIN_NUMBER &&
-      inbound.participant === WASENDER_ADMIN_NUMBER,
-  );
   if (inbound.isGroup && !WASENDER_ALLOW_GROUPS) {
     return res.json({ ok: true, ignored: true, reason: "groups disabled" });
-  }
-  if (approvalFlow && !isProjectOwnerInstruction) {
-    return res.json({ ok: true, ignored: true, reason: "approval sender not allowed" });
   }
   if (!isOwnerInstruction && !wasenderSenderAllowed(inbound.sender)) {
     return res.json({ ok: true, ignored: true, reason: "sender not allowed" });
@@ -1218,7 +1210,6 @@ app.post("/hooks/wasender", (req, res) => {
         const teamFlow = await resolveTeamFlow(inbound.sender);
         if (teamFlow) {
           activeTeamFlow = teamFlow;
-          if (WASENDER_ADMIN_NUMBER && inbound.participant !== WASENDER_ADMIN_NUMBER) return;
           return processTeamGroupMessage(inbound, teamFlow);
         }
         const intakeFlow = await resolveProjectIntakeFlow(inbound.sender);
