@@ -21,6 +21,7 @@ import {
 import {
   chooseAgentExecutor,
   compactTaskTitle,
+  findReferencedTask,
   formatTaskCreatedMessage,
   formatTaskUpdateMessage,
   taskSnapshotChanged,
@@ -878,6 +879,22 @@ function startAyesTaskWatcher() {
   console.log(`[ayes-task] lifecycle watcher enabled (${AYES_TASK_WATCH_INTERVAL_MS}ms)`);
 }
 
+async function findAyesTaskFromMessage(text) {
+  if (!ayesTaskConfigured()) return null;
+  try {
+    const login = await ayesTaskRequest("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ email: AYES_TASK_EMAIL, password: AYES_TASK_PASSWORD }),
+    });
+    if (!login.accessToken) return null;
+    const response = await ayesTaskRequest("/agent-tasks", { token: login.accessToken });
+    return findReferencedTask(text, response?.items);
+  } catch (error) {
+    console.error(`[ayes-task] task lookup failed: ${String(error)}`);
+    return null;
+  }
+}
+
 function latestPendingApproval(code = "", approvalTarget = "") {
   if (code) {
     const entry = wasenderPending[code] || null;
@@ -1279,13 +1296,16 @@ async function processDirectGroupMessage(inbound, agentId) {
 }
 
 function isExplicitTeamApproval(text) {
-  return /^(?:ok|okay|başla|basla|icra et|et|davam et|davam|təsdiq|tesdiq)(?:\s|[.!?,]|$)/i.test(
-    String(text || "").trim(),
+  const input = String(text || "").trim();
+  return (
+    /^(?:ok|okay|başla|basla|icra et|et|davam et|davam|təsdiq|tesdiq)(?:\s|[.!?,]|$)/i.test(input) ||
+    /(?:^|\s)(?:icraya\s+başla|icraya\s+basla|davam\s+et|təsdiq|tesdiq)\s*[.!?]*$/i.test(input)
   );
 }
 
 async function processTeamGroupMessage(inbound, flow) {
   const approved = isExplicitTeamApproval(inbound.text);
+  const referencedTask = await findAyesTaskFromMessage(inbound.text);
   if (approved) {
     await sendWasenderText(
       inbound.sender,
@@ -1307,6 +1327,9 @@ async function processTeamGroupMessage(inbound, flow) {
       "İstifadəçidən worker agentlərlə ayrıca danışmağı istəmə. Onların nəticəsini sən çatdır.",
       "Cavabları Azərbaycan dilində qısa və aydın yaz. Öz mətnini '🛠️ Cavad:' ilə başlat.",
       "Agent nəticəsi varsa ayrıca sətirdə uyğun prefiks istifadə et: '⚙️ AEM Backend:', '🖥️ AEM Frontend:', '📱 AEM Mobile:', '🧪 AEM QA:' və ya '🚀 AEM DevOps:'.",
+      referencedTask
+        ? `Task sistemindən tapılan məlumat:\nID: ${referencedTask.number || referencedTask.id}\nBaşlıq: ${referencedTask.title}\nStatus: ${referencedTask.status}\nTəsvir: ${referencedTask.description}`
+        : "Mesajda tanınan Task ID yoxdur. Lazım olan iş təsvirini istifadəçinin mesajından götür.",
       `Bu mesaj açıq icra təsdiqidir: ${approved ? "Bəli" : "Xeyr"}`,
       `İstifadəçinin mesajı: ${inbound.text}`,
     ].join("\n\n"),

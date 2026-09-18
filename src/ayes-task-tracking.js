@@ -82,6 +82,18 @@ export function taskSnapshotChanged(previous, current) {
   );
 }
 
+export function findReferencedTask(text, tasks) {
+  const input = String(text || "").toLocaleLowerCase("az-AZ");
+  if (!input) return null;
+  return (
+    (Array.isArray(tasks) ? tasks : []).find((task) => {
+      const number = String(task?.number || "").toLocaleLowerCase("az-AZ");
+      const id = String(task?.id || "").toLocaleLowerCase("az-AZ");
+      return (number && input.includes(number)) || (id && input.includes(id));
+    }) || null
+  );
+}
+
 export function formatTaskCreatedMessage(task, taskUrl) {
   const number = task?.number || task?.id || "Task";
   const executor = personName(task?.executor, "Developer");
@@ -118,4 +130,3 @@ export function formatTaskUpdateMessage(task, taskUrl) {
   lines.push(`🔗 ${taskUrl}`);
   return lines.join("\n");
 }
-

@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   chooseAgentExecutor,
   compactTaskTitle,
+  findReferencedTask,
   formatTaskCreatedMessage,
   formatTaskUpdateMessage,
   taskSnapshotChanged,
@@ -43,3 +44,12 @@ test("detects meaningful task lifecycle changes", () => {
   assert.equal(taskSnapshotChanged(previous, progressed), true);
 });
 
+test("finds a task referenced by number or id", () => {
+  const tasks = [
+    { id: "task-uuid-1", number: "AEM-42", title: "Login" },
+    { id: "task-uuid-2", number: "AEM-43", title: "Dashboard" },
+  ];
+  assert.equal(findReferencedTask("AEM-43 icraya başla", tasks)?.title, "Dashboard");
+  assert.equal(findReferencedTask("task-uuid-1 davam et", tasks)?.title, "Login");
+  assert.equal(findReferencedTask("icraya başla", tasks), null);
+});
