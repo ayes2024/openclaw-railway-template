@@ -164,3 +164,11 @@ export function parseApprovalInstruction(value) {
   }
   return { code, action: "instruction", text: instruction };
 }
+
+export function parseDirectTaskRequest(value) {
+  const input = String(value || "").trim();
+  const match = input.match(
+    /^(?:task\s*(?:aç|ac)|yeni\s+task|tapşırıq\s*(?:aç|ac)|tapsiriq\s*(?:aç|ac))\s*[:\-]\s*([\s\S]{3,})$/i,
+  );
+  return match?.[1]?.trim() || "";
+}

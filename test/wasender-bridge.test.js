@@ -7,6 +7,7 @@ import {
   makeApprovalCode,
   normalizeWasenderSender,
   parseApprovalInstruction,
+  parseDirectTaskRequest,
   parseWasenderInbound,
   safeEqual,
 } from "../src/wasender-bridge.js";
@@ -126,4 +127,13 @@ test("creates stable approval codes and parses owner commands", () => {
     action: "task",
     text: "",
   });
+});
+
+test("parses a direct task request with its description", () => {
+  assert.equal(
+    parseDirectTaskRequest("Task aç: Mobil tətbiqdə giriş düyməsi işləmir"),
+    "Mobil tətbiqdə giriş düyməsi işləmir",
+  );
+  assert.equal(parseDirectTaskRequest("Task aç"), "");
+  assert.equal(parseDirectTaskRequest("Bu problemi araşdır"), "");
 });

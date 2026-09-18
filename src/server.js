@@ -14,6 +14,7 @@ import {
   makeApprovalCode,
   normalizeWasenderSender,
   parseApprovalInstruction,
+  parseDirectTaskRequest,
   parseWasenderInbound,
   safeEqual,
 } from "./wasender-bridge.js";
@@ -1103,6 +1104,37 @@ async function processProjectApprovalMessage(inbound, flow) {
   const entry = latestPendingApproval(parsed?.code || "", flow.approvalGroupJid);
 
   if (!entry) {
+    const directTaskText = parseDirectTaskRequest(inbound.text);
+    if (directTaskText) {
+      const analysis = await runWasenderAgent(
+        `direct-task-${flow.approvalGroupJid}`,
+        [
+          `Bu daxili iş ${flow.name} layihəsinin sahibi tərəfindən birbaşa verilib.`,
+          "AEM biznes analitiki kimi tələbi texniki task üçün aydınlaşdır.",
+          "Qısa məzmun, təsirlənən sistem hissəsi, gözlənilən nəticə və qəbul meyarlarını yaz.",
+          `İşin təsviri: ${directTaskText}`,
+        ].join("\n\n"),
+        flow.agentId,
+      );
+      const directEntry = {
+        sender: flow.approvalGroupJid,
+        text: directTaskText,
+        analysis,
+        agentId: flow.agentId,
+      };
+      const createdTask = await createProjectTask(directEntry);
+      await sendWasenderLongText(
+        flow.approvalGroupJid,
+        [
+          "✅ Agent task yaradıldı.",
+          `ID: ${createdTask.number || createdTask.id || "Task"}`,
+          `Başlıq: ${compactTaskTitle(createdTask.title || directTaskText)}`,
+          "İcra gedişatı AEM ai agent Team qrupunda görünəcək.",
+        ].join("\n"),
+      );
+      return;
+    }
+
     const answer = await runWasenderAgent(
       `approval-${flow.approvalGroupJid}`,
       [
