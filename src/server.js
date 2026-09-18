@@ -237,6 +237,15 @@ function projectMemoryInstruction({ update = false } = {}) {
   return instructions.join("\n");
 }
 
+function baConfidenceInstruction() {
+  return [
+    "Problem barədə diaqnoz və ya texniki anlayış təqdim edəndə iki ayrıca sətir yaz:",
+    '"Problemi belə anladım: ..."',
+    '"Əminlik: XX%"',
+    "Əminlik faizini 0-100 aralığında real sübutlara görə seç. Faizin səbəbini ayrıca izah etmə.",
+  ].join("\n");
+}
+
 function projectCaseSession(entry) {
   return `case-${entry?.code || entry?.task?.id || crypto.randomUUID()}`;
 }
@@ -1016,6 +1025,7 @@ async function processOwnerInstruction(inbound) {
     const answer = await runWasenderAgent(
       `owner-${WASENDER_ADMIN_NUMBER}`,
       [
+        baConfidenceInstruction(),
         "Bu mesaj AEM layihəsinin sahibindən birbaşa sənə gəlir.",
         "Cavad AEM biznes analitiki kimi normal söhbət et və suala cavab ver.",
         "Lazım olduqda layihə repolarını araşdır. Qarşı tərəfə mesaj göndərmə; yalnız sahibə cavab yaz.",
@@ -1190,6 +1200,7 @@ async function processProjectApprovalMessage(inbound, flow) {
     }
     const prompt = [
       projectMemoryInstruction({ update: workRequested }),
+      baConfidenceInstruction(),
       `Bu mesaj ${flow.name} layihəsinin sahibindən daxili BA qrupunda gəlir.`,
       "Cavad biznes analitiki kimi normal söhbət et. Müştəri qrupuna heç nə göndərmə.",
       `Sahibin mesajı: ${inbound.text}`,
@@ -1213,6 +1224,7 @@ async function processProjectApprovalMessage(inbound, flow) {
       projectCaseSession(entry),
       [
         projectMemoryInstruction(),
+        baConfidenceInstruction(),
         "Sahib müştəriyə cavab göndərmədən məsələ barədə daxili izah istəyir.",
         "Azərbaycan dilində texniki, aydın və praktik cavab ver.",
         `Müştəri mesajı: ${entry.text}`,
@@ -1265,10 +1277,11 @@ async function processProjectIntakeMessage(inbound, flow) {
     `case-${code}`,
     [
       projectMemoryInstruction(),
+      baConfidenceInstruction(),
       `Yeni mesaj ${flow.name} müştəri qrupundan gəlib.`,
       "AEM biznes analitiki kimi problemi anla və lazım olsa layihə repolarını araşdır.",
       "Hələ müştəriyə cavab vermə. Layihə sahibinə Azərbaycan dilində texniki və aydın hesabat hazırla.",
-      "Bölmələr: Qısa məzmun, Ehtimal olunan səbəb, Kod/sistem tapıntısı, Tövsiyə, Task lazımdır (Bəli/Xeyr), Müştəriyə təklif olunan cavab.",
+      "Bölmələr: Problemi belə anladım, Əminlik, Diaqnoz, Kod/sistem tapıntısı, Tövsiyə, Task lazımdır (Bəli/Xeyr), Müştəriyə təklif olunan cavab.",
       `Yazan: ${inbound.participant ? `+${inbound.participant}` : "qrup iştirakçısı"}`,
       `Mesaj: ${inbound.text}`,
     ].join("\n\n"),
@@ -1295,9 +1308,9 @@ async function processProjectIntakeMessage(inbound, flow) {
 
 async function processWasenderMessage(inbound) {
   const agentMessage =
-    `Yeni WhatsApp mesajını AEM biznes analitiki kimi araşdır. Lazım olsa kod repolarına bax. ` +
+    `${baConfidenceInstruction()}\n\nYeni WhatsApp mesajını AEM biznes analitiki kimi araşdır. Lazım olsa kod repolarına bax. ` +
     `Hələ qarşı tərəfə cavab göndərmə. Azərbaycan dilində qısa şəkildə Xülasə, Tapıntı, ` +
-    `Tövsiyə olunan cavab və Task lazımdır (Bəli/Xeyr) bölmələri ilə sahibə hesabat hazırla.\n\n` +
+    `Diaqnoz, Əminlik, Tövsiyə olunan cavab və Task lazımdır (Bəli/Xeyr) bölmələri ilə sahibə hesabat hazırla.\n\n` +
     (inbound.isGroup && inbound.participant
       ? `Qrup mesajı, yazan +${inbound.participant}:\n${inbound.text}`
       : `Şəxsi mesaj, yazan +${inbound.sender}:\n${inbound.text}`);
@@ -1328,6 +1341,7 @@ async function processDirectGroupMessage(inbound, agentId) {
   const answer = await runWasenderAgent(
     inbound.sender,
     [
+      baConfidenceInstruction(),
       "Bu mesaj sənə aid xüsusi WhatsApp layihə qrupundan gəlir.",
       "Cavad AEM biznes analitiki kimi normal söhbət et və suala birbaşa cavab ver.",
       "Lazım olduqda AEM layihə repolarını araşdır. Cavabını Azərbaycan dilində, aydın və praktik yaz.",
@@ -1359,6 +1373,7 @@ async function processTeamGroupMessage(inbound, flow) {
 
   const teamPrompt = [
       projectMemoryInstruction({ update: approved && Boolean(referencedTask) }),
+      baConfidenceInstruction(),
       `Bu mesaj ${flow.name} adlı daxili WhatsApp idarəetmə qrupundan gəlir.`,
       "Sən Cavad AEM BA və komandanın yeganə əlaqələndiricisisən. İstifadəçi yalnız səninlə danışır.",
       "AEM Backend, AEM Frontend, AEM Mobile, AEM QA və AEM DevOps agentlərini öz daxilində koordinasiya et.",
