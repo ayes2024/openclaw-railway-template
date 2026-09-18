@@ -17,6 +17,14 @@ import {
   parseWasenderInbound,
   safeEqual,
 } from "./wasender-bridge.js";
+import {
+  chooseAgentExecutor,
+  compactTaskTitle,
+  formatTaskCreatedMessage,
+  formatTaskUpdateMessage,
+  taskSnapshotChanged,
+  taskStatusSnapshot,
+} from "./ayes-task-tracking.js";
 
 // Migrate deprecated CLAWDBOT_* env vars → OPENCLAW_* so existing Railway deployments
 // keep working. Users should update their Railway Variables to use the new names.
@@ -84,11 +92,33 @@ const AYES_TASK_TYPE_ID = process.env.AYES_TASK_TYPE_ID?.trim();
 const AYES_TASK_EXECUTOR_IDS = splitIds(process.env.AYES_TASK_EXECUTOR_IDS);
 const AYES_TASK_REVIEWER_IDS = splitIds(process.env.AYES_TASK_REVIEWER_IDS);
 const AYES_TASK_APPROVER_IDS = splitIds(process.env.AYES_TASK_APPROVER_IDS);
+const AYES_TASK_AGENT_USER_IDS = parseStringMap(process.env.AYES_TASK_AGENT_USER_IDS);
+const AYES_TASK_UPDATES_GROUP_JID = normalizeWasenderSender(
+  process.env.AYES_TASK_UPDATES_GROUP_JID || "",
+);
+const AYES_TASK_WATCH_INTERVAL_MS = Math.max(
+  15_000,
+  Number.parseInt(process.env.AYES_TASK_WATCH_INTERVAL_MS || "30000", 10) || 30_000,
+);
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY?.trim();
 const OPENAI_TRANSCRIBE_MODEL = process.env.OPENAI_TRANSCRIBE_MODEL?.trim() || "gpt-4o-mini-transcribe";
 
 function splitIds(value) {
   return String(value || "").split(",").map((item) => item.trim()).filter(Boolean);
+}
+
+function parseStringMap(value) {
+  if (!value?.trim()) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return Object.fromEntries(
+      Object.entries(parsed)
+        .map(([key, item]) => [String(key).trim(), String(item || "").trim()])
+        .filter(([key, item]) => key && item),
+    );
+  } catch {
+    return {};
+  }
 }
 
 function parseGroupAgentRoutes(value) {
@@ -163,9 +193,9 @@ function ayesTaskConfigured() {
     AYES_TASK_EMAIL &&
       AYES_TASK_PASSWORD &&
       AYES_TASK_PROJECT_ID &&
-      AYES_TASK_TYPE_ID &&
-      AYES_TASK_EXECUTOR_IDS.length &&
-      AYES_TASK_REVIEWER_IDS.length &&
+      Object.keys(AYES_TASK_AGENT_USER_IDS).length &&
+      AYES_TASK_AGENT_USER_IDS["aem-qa"] &&
+      AYES_TASK_AGENT_USER_IDS["aem-devops"] &&
       AYES_TASK_APPROVER_IDS.length,
   );
 }
@@ -722,6 +752,51 @@ async function ayesTaskRequest(pathname, options = {}) {
   return body;
 }
 
+const AYES_TASK_WATCH_PATH = path.join(STATE_DIR, "ayes-agent-task-watch.json");
+let ayesTaskWatch = loadAyesTaskWatch();
+let ayesTaskWatchRunning = false;
+let ayesTaskWatchTimer = null;
+const AYES_TASK_WATCH_STARTED_AT = Date.now();
+
+function loadAyesTaskWatch() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(AYES_TASK_WATCH_PATH, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveAyesTaskWatch() {
+  fs.mkdirSync(path.dirname(AYES_TASK_WATCH_PATH), { recursive: true });
+  const entries = Object.entries(ayesTaskWatch).slice(-500);
+  const temporary = `${AYES_TASK_WATCH_PATH}.tmp`;
+  fs.writeFileSync(temporary, JSON.stringify(Object.fromEntries(entries), null, 2), { mode: 0o600 });
+  fs.renameSync(temporary, AYES_TASK_WATCH_PATH);
+}
+
+function taskUpdatesGroupJid() {
+  if (AYES_TASK_UPDATES_GROUP_JID.endsWith("@g.us")) return AYES_TASK_UPDATES_GROUP_JID;
+  return WASENDER_TEAM_FLOWS.find((flow) => flow.groupJid.endsWith("@g.us"))?.groupJid || "";
+}
+
+function rememberAyesTask(task) {
+  if (!task?.id) return;
+  ayesTaskWatch[task.id] = taskStatusSnapshot(task);
+  saveAyesTaskWatch();
+}
+
+async function announceAyesTaskCreated(task) {
+  const target = taskUpdatesGroupJid();
+  if (target && WASENDER_API_KEY) {
+    await sendWasenderLongText(
+      target,
+      formatTaskCreatedMessage(task, `${AYES_TASK_URL}/agent-tasks`),
+    );
+  }
+  rememberAyesTask(task);
+}
+
 async function createAyesTask(draft) {
   const login = await ayesTaskRequest("/auth/login", {
     method: "POST",
@@ -729,31 +804,77 @@ async function createAyesTask(draft) {
   });
   if (!login.accessToken) throw new Error("AYES Task login returned no access token");
 
-  const deadline = new Date(Date.now() + 24 * 60 * 60 * 1_000);
-  deadline.setMinutes(0, 0, 0);
-  return ayesTaskRequest("/tasks", {
+  const executor = chooseAgentExecutor(draft, AYES_TASK_AGENT_USER_IDS);
+  if (!executor.userId) throw new Error("AYES Task üçün uyğun developer tapılmadı");
+  const createdTask = await ayesTaskRequest("/agent-tasks", {
     method: "POST",
     token: login.accessToken,
     body: JSON.stringify({
-      title: String(draft.title || "WhatsApp-dan daxil olan məsələ").slice(0, 250),
+      title: compactTaskTitle(draft.title),
       description: String(draft.description || ""),
-      link: "",
       projectId: AYES_TASK_PROJECT_ID,
-      taskTypeId: AYES_TASK_TYPE_ID,
-      category: ["NEW_FEATURE", "DEVELOPMENT", "BUG"].includes(draft.category)
-        ? draft.category
-        : "BUG",
-      priority: ["LOW", "MEDIUM", "HIGH", "CRITICAL"].includes(draft.priority)
-        ? draft.priority
-        : "MEDIUM",
-      deadline: deadline.toISOString(),
-      estimatedMinutes: Number.isFinite(draft.estimatedMinutes) ? draft.estimatedMinutes : 0,
-      executorIds: AYES_TASK_EXECUTOR_IDS,
-      reviewerIds: AYES_TASK_REVIEWER_IDS,
-      approverIds: AYES_TASK_APPROVER_IDS,
-      attachments: [],
+      executorId: executor.userId,
+      reviewerId: AYES_TASK_AGENT_USER_IDS["aem-qa"],
+      devopsId: AYES_TASK_AGENT_USER_IDS["aem-devops"],
+      approverId: login.user?.id || AYES_TASK_EXECUTOR_IDS[0],
+      finalApproverId: AYES_TASK_APPROVER_IDS[0] || AYES_TASK_REVIEWER_IDS[0],
     }),
   });
+  try {
+    await announceAyesTaskCreated(createdTask);
+  } catch (error) {
+    console.error(`[ayes-task] created notification failed: ${String(error)}`);
+  }
+  return createdTask;
+}
+
+async function pollAyesTaskUpdates() {
+  if (ayesTaskWatchRunning || !ayesTaskConfigured() || !taskUpdatesGroupJid()) return;
+  ayesTaskWatchRunning = true;
+  try {
+    const login = await ayesTaskRequest("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ email: AYES_TASK_EMAIL, password: AYES_TASK_PASSWORD }),
+    });
+    if (!login.accessToken) throw new Error("AYES Task login returned no access token");
+    const response = await ayesTaskRequest("/agent-tasks", { token: login.accessToken });
+    const tasks = Array.isArray(response?.items) ? response.items : [];
+    let changed = false;
+    for (const task of tasks) {
+      if (!task?.id) continue;
+      const current = taskStatusSnapshot(task);
+      const previous = ayesTaskWatch[task.id];
+      const createdAt = Date.parse(task.createdAt || "");
+      if (!previous && Number.isFinite(createdAt) && createdAt >= AYES_TASK_WATCH_STARTED_AT - 60_000) {
+        await sendWasenderLongText(
+          taskUpdatesGroupJid(),
+          formatTaskCreatedMessage(task, `${AYES_TASK_URL}/agent-tasks`),
+        );
+      } else if (taskSnapshotChanged(previous, current)) {
+        await sendWasenderLongText(
+          taskUpdatesGroupJid(),
+          formatTaskUpdateMessage(task, `${AYES_TASK_URL}/agent-tasks`),
+        );
+      }
+      if (!previous || JSON.stringify(previous) !== JSON.stringify(current)) {
+        ayesTaskWatch[task.id] = current;
+        changed = true;
+      }
+    }
+    if (changed) saveAyesTaskWatch();
+  } catch (error) {
+    console.error(`[ayes-task] watcher failed: ${String(error)}`);
+  } finally {
+    ayesTaskWatchRunning = false;
+  }
+}
+
+function startAyesTaskWatcher() {
+  if (!ayesTaskConfigured() || !taskUpdatesGroupJid() || ayesTaskWatchTimer) return;
+  void pollAyesTaskUpdates();
+  ayesTaskWatchTimer = setInterval(() => void pollAyesTaskUpdates(), AYES_TASK_WATCH_INTERVAL_MS);
+  ayesTaskWatchTimer.unref?.();
+  console.log(`[ayes-task] lifecycle watcher enabled (${AYES_TASK_WATCH_INTERVAL_MS}ms)`);
 }
 
 function latestPendingApproval(code = "", approvalTarget = "") {
@@ -830,7 +951,8 @@ async function processOwnerInstruction(inbound) {
       [
         "Sahib bu WhatsApp məsələsi üçün task açılmasını istəyir.",
         "Yalnız etibarlı JSON qaytar. Markdown və əlavə mətn yazma.",
-        'Format: {"title":"...","description":"...","category":"BUG|DEVELOPMENT|NEW_FEATURE","priority":"LOW|MEDIUM|HIGH|CRITICAL","estimatedMinutes":0}',
+        'Format: {"title":"...","description":"...","agentId":"aem-backend|aem-frontend|aem-mobile"}',
+        "title maksimum 8 söz olsun. Problemi icra edəcək əsas developer agentini agentId ilə seç.",
         "description daxilində faktiki nəticə, gözlənilən nəticə, təsirlənən hissə və qəbul meyarlarını yaz.",
         `Orijinal mesaj: ${entry.text}`,
         `Əvvəlki analiz: ${entry.analysis}`,
@@ -840,9 +962,7 @@ async function processOwnerInstruction(inbound) {
     const taskDraft = parseAgentJson(taskDraftText) || {
       title: `WhatsApp məsələsi: ${entry.text.slice(0, 180)}`,
       description: `${entry.analysis}\n\nOrijinal mesaj:\n${entry.text}`,
-      category: "BUG",
-      priority: "MEDIUM",
-      estimatedMinutes: 0,
+      agentId: "aem-backend",
     };
 
     if (ayesTaskConfigured()) {
@@ -946,7 +1066,8 @@ async function createProjectTask(entry) {
     [
       "Bu müştəri müraciətindən AYES Task üçün texniki task hazırla.",
       "Yalnız etibarlı JSON qaytar. Markdown və əlavə mətn yazma.",
-      'Format: {"title":"...","description":"...","category":"BUG|DEVELOPMENT|NEW_FEATURE","priority":"LOW|MEDIUM|HIGH|CRITICAL","estimatedMinutes":0}',
+      'Format: {"title":"...","description":"...","agentId":"aem-backend|aem-frontend|aem-mobile"}',
+      "title maksimum 8 söz olsun. Problemi icra edəcək əsas developer agentini agentId ilə seç.",
       "description daxilində faktiki nəticə, gözlənilən nəticə, təsirlənən hissə və qəbul meyarlarını yaz.",
       `Orijinal müştəri mesajı: ${entry.text}`,
       `Cavadın texniki analizi: ${entry.analysis}`,
@@ -956,9 +1077,7 @@ async function createProjectTask(entry) {
   const taskDraft = parseAgentJson(taskDraftText) || {
     title: `WhatsApp məsələsi: ${entry.text.slice(0, 180)}`,
     description: `${entry.analysis}\n\nOrijinal mesaj:\n${entry.text}`,
-    category: "BUG",
-    priority: "MEDIUM",
-    estimatedMinutes: 0,
+    agentId: "aem-backend",
   };
   return createAyesTask(taskDraft);
 }
@@ -1147,14 +1266,15 @@ async function processTeamGroupMessage(inbound, flow) {
     [
       `Bu mesaj ${flow.name} adlı daxili WhatsApp idarəetmə qrupundan gəlir.`,
       "Sən Cavad AEM BA və komandanın yeganə əlaqələndiricisisən. İstifadəçi yalnız səninlə danışır.",
-      "AEM Backend, AEM Frontend, AEM Mobile və AEM QA agentlərini öz daxilində koordinasiya et.",
+      "AEM Backend, AEM Frontend, AEM Mobile, AEM QA və AEM DevOps agentlərini öz daxilində koordinasiya et.",
       "Yeni tapşırıqda əvvəl problemi anla, uyğun agentləri və icra planını qısa yaz, sonra 'İcraya başlayım?' deyə təsdiq istə.",
       "İstifadəçi açıq şəkildə OK, başla, icra et və ya davam et deməyibsə kodu dəyişmə və xarici əməliyyat etmə.",
       "Açıq təsdiq verilibsə uyğun developer agentinə işi gördür, sonra AEM QA agentinə yoxlatdır.",
+      "Task varsa bütün agent cavablarında Task ID-ni yaz. Hər agentin nə etdiyini ayrıca və konkret göstər.",
       "Bu WhatsApp sorğusunda sessions_yield etmə. İşə saldığın agentlərin nəticəsini agents_wait ilə gözlə və yekun cavabı bu turn daxilində qaytar.",
       "İstifadəçidən worker agentlərlə ayrıca danışmağı istəmə. Onların nəticəsini sən çatdır.",
       "Cavabları Azərbaycan dilində qısa və aydın yaz. Öz mətnini '🛠️ Cavad:' ilə başlat.",
-      "Agent nəticəsi varsa ayrıca sətirdə uyğun prefiks istifadə et: '⚙️ AEM Backend:', '🖥️ AEM Frontend:', '📱 AEM Mobile:' və ya '🧪 AEM QA:'.",
+      "Agent nəticəsi varsa ayrıca sətirdə uyğun prefiks istifadə et: '⚙️ AEM Backend:', '🖥️ AEM Frontend:', '📱 AEM Mobile:', '🧪 AEM QA:' və ya '🚀 AEM DevOps:'.",
       `Bu mesaj açıq icra təsdiqidir: ${approved ? "Bəli" : "Xeyr"}`,
       `İstifadəçinin mesajı: ${inbound.text}`,
     ].join("\n\n"),
@@ -2348,6 +2468,8 @@ const server = app.listen(PORT, "0.0.0.0", async () => {
       console.error(`[wrapper] gateway failed to start at boot: ${String(err)}`);
     }
   }
+
+  startAyesTaskWatcher();
 });
 
 server.on("upgrade", async (req, socket, head) => {
@@ -2371,6 +2493,7 @@ server.on("upgrade", async (req, socket, head) => {
 
 process.on("SIGTERM", () => {
   // Best-effort shutdown
+  if (ayesTaskWatchTimer) clearInterval(ayesTaskWatchTimer);
   try {
     if (gatewayProc) gatewayProc.kill("SIGTERM");
   } catch {
